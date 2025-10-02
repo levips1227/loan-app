@@ -1,0 +1,1555 @@
+import React from 'react';
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  Legend,
+  ResponsiveContainer,
+} from 'recharts';
+
+// =============================
+// Utility + Business Logic
+// =============================
+const EPS = 1e-6;
+const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
+const nearlyEqual = (a, b, eps = EPS) => Math.abs(a - b) <= eps;
+const parseISO = (d) => new Date(d);
+const toISODate = (d) => new Date(d).toISOString().slice(0, 10);
+const daysBetween = (d1, d2) => {
+  const t1 = new Date(toISODate(d1)).getTime();
+  const t2 = new Date(toISODate(d2)).getTime();
+  return Math.max(0, Math.round((t2 - t1) / (1000 * 60 * 60 * 24)));
+};
+const addDays = (date, days) => {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+};
+const addMonths = (date, months) => {
+  const d = new Date(date);
+  d.setMonth(d.getMonth() + months);
+  return d;
+};
+const addYears = (date, years) => {
+  const d = new Date(date);
+  d.setFullYear(d.getFullYear() + years);
+  return d;
+};
+
+const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
+const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
+
+function nextByFreq(dt, freq) {
+  switch (freq) {
+    case 'Weekly': return addDays(dt, 7);
+    case 'Biweekly': return addDays(dt, 14);
+    case 'Monthly': return addMonths(dt, 1);
+    case 'Quarterly': return addMonths(dt, 3);
+    case 'Annual': return addYears(dt, 1);
+    default: return addMonths(dt, 1);
+  }
+}
+function periodsPerYear(freq) { return FREQ[freq] || 12; }
+
+function calcPerDiem(apr, balance) { return (apr ?? 0) / 365 * (balance ?? 0); }
+function calcPayoff(balance, apr, daysSince) { return Math.max(0, round2(balance + calcPerDiem(apr, balance) * Math.max(0, daysSince))); }
+
+// Generic amortized payment by period
+function amortizedPayment(P, apr, nPeriods, ppy) {
+  if (nPeriods <= 0) return 0;
+  // Convert annual rate to periodic rate
+  const r = (apr ?? 0) / ppy;
+  if (Math.abs(r) < EPS) return round2((P ?? 0) / nPeriods);
+  // Standard amortization formula: PMT = P * (r(1+r)^n)/((1+r)^n - 1)
+  const a = (P ?? 0) * (r * Math.pow(1 + r, nPeriods)) / (Math.pow(1 + r, nPeriods) - 1);
+  return round2(Math.max(0, a));
+}
+
+function isAmortizedType(type) {
+  return type === 'Mortgage' || type === 'Car Loan' || type === 'Personal Loan';
+}
+
+// FIXED PI for amortized loans: based on ORIGINAL principal and ORIGINAL term
+function fixedPIForLoan(loan) {
+  const freq = loan.PaymentFrequency || 'Monthly';
+  const ppy = periodsPerYear(freq);
+  // Calculate total number of payments over the loan term
+  const n = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
+  const P = loan.OriginalPrincipal ?? 0;
+  // Calculate fixed payment using amortization formula
+  const payment = amortizedPayment(P, loan.APR, n, ppy);
+  return payment;
+}
+
+// Payment rule by loan type + frequency (principal & interest only; escrow handled separately)
+function principalInterestPaymentFor(balance, apr, remainingMonths, freq, type) {
+  const ppy = periodsPerYear(freq);
+  const nPeriods = Math.max(1, Math.round((remainingMonths || 0) * ppy / 12));
+  switch (type) {
+    case 'Mortgage':
+    case 'Car Loan':
+    case 'Personal Loan':
+      return amortizedPayment(balance, apr, nPeriods, ppy);
+    case 'Revolving LOC':
+      return round2((apr ?? 0) / ppy * (balance ?? 0)); // interest-only minimum
+    case 'Credit Card': {
+      // Common rule of thumb: monthly minimum = max(2% of balance, $25)
+      const monthlyMin = Math.max(round2((balance ?? 0) * 0.02), 25);
+      return round2(monthlyMin * 12 / ppy);
+    }
+    default:
+      return amortizedPayment(balance, apr, nPeriods, ppy);
+  }
+}
+
+// Full payment incl. escrow for a given loan
+// CHANGE: for amortized types we now compute PI from ORIGINAL principal & term (fixed),
+// falling back to provided `balance` only if OriginalPrincipal is missing (keeps tests valid).
+function scheduledPaymentFor(loan, balance, _remainingMonthsOverride) {
+  const ppy = periodsPerYear(loan.PaymentFrequency || 'Monthly');
+  let basePI = 0;
+  if (isAmortizedType(loan.LoanType || 'Mortgage')) {
+    if (typeof loan.OriginalPrincipal === 'number') {
+      basePI = fixedPIForLoan(loan);
+    } else {
+      const nPeriods = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
+      basePI = amortizedPayment(balance ?? 0, loan.APR, nPeriods, ppy);
+    }
+  } else if ((loan.LoanType || '') === 'Revolving LOC') {
+    basePI = round2((loan.APR ?? 0) / ppy * (balance ?? 0));
+  } else if ((loan.LoanType || '') === 'Credit Card') {
+    const monthlyMin = Math.max(round2((balance ?? 0) * 0.02), 25);
+    basePI = round2((monthlyMin * 12) / ppy);
+  } else {
+    const nPeriods = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
+    basePI = amortizedPayment(balance ?? 0, loan.APR, nPeriods, ppy);
+  }
+  const escrowPerPeriod = round2(((loan.EscrowMonthly || 0) * 12) / ppy);
+  return round2(basePI + escrowPerPeriod);
+}
+
+// ============ PAYMENT/ DRAW RE-CALC (historical) ============
+// Recalculate principal/interest for a SINGLE loan across all its payments in chronological order, factoring draws
+function recalcLoanPayments(loan, allPayments, allDraws = []) {
+  const pay = allPayments
+    .filter((p) => p.LoanRef === loan.id)
+    .map((p) => ({ ...p, _type: 'payment' }));
+  const draws = allDraws
+    .filter((d) => d.LoanRef === loan.id)
+    .map((d) => ({ ...d, _type: 'draw' }));
+
+  const events = [...pay, ...draws].sort((a, b) => new Date(a.PaymentDate || a.DrawDate) - new Date(b.PaymentDate || b.DrawDate));
+
+  let balance = loan.OriginalPrincipal ?? 0;
+  let lastDate = parseISO(loan.OriginationDate);
+
+  const updatedPayments = [];
+
+  for (const ev of events) {
+    const evDate = parseISO(ev.PaymentDate || ev.DrawDate);
+    const days = daysBetween(lastDate, evDate);
+    const interestAccrued = round2(balance * (loan.APR ?? 0) / 365 * days);
+    balance = round2(balance + interestAccrued); // accrue interest up to event date
+
+    if (ev._type === 'payment') {
+      const payAmt = ev.Amount ?? 0;
+      const interest = Math.min(payAmt, interestAccrued);
+      let principal = round2(payAmt - interest);
+      if (principal < 0) principal = 0;
+      balance = round2(balance - principal);
+
+      updatedPayments.push({
+        ...ev,
+        InterestPortion: round2(interest),
+        PrincipalPortion: round2(principal),
+      });
+    } else if (ev._type === 'draw') {
+      const drawAmt = ev.Amount ?? 0;
+      balance = round2(balance + drawAmt);
+    }
+
+    lastDate = evDate;
+  }
+
+  // Merge back into payments list
+  const updatedIds = new Set(updatedPayments.map((x) => x.id));
+  const merged = allPayments.map((p) => (updatedIds.has(p.id) ? updatedPayments.find((x) => x.id === p.id) : p));
+  return merged;
+}
+
+function recalcAllLoans(loans, payments, draws) {
+  let out = payments;
+  for (const loan of loans) out = recalcLoanPayments(loan, out, draws);
+  return out;
+}
+
+// ============ PROJECTION/ CALCULATOR ============
+// Build projection events from a start date using base schedule + extras + draws
+function projectToPayoff({ loan, balanceStart, startDate, extras = [], draws = [], maxYears = 100 }) {
+  const events = [];
+  const freq = loan.PaymentFrequency || 'Monthly';
+  const ppy = periodsPerYear(freq);
+  const endDate = addYears(startDate, maxYears);
+
+  // Precompute constant parts
+  const escrowPerPeriod = round2(((loan.EscrowMonthly || 0) * 12) / ppy);
+  const amortized = isAmortizedType(loan.LoanType || 'Mortgage');
+
+  // Determine whether this loan should be projected using a fixed payment schedule
+  const usesFixedPayment = !!loan.FixedPayment || amortized;
+
+  // Compute remaining periods based on origination date + TermMonths
+  let remainingPeriods = null;
+  if (loan.TermMonths && loan.OriginationDate) {
+    const orig = parseISO(loan.OriginationDate);
+    // More accurate months calculation considering day of month
+    const origDate = new Date(orig);
+    const startDt = new Date(startDate);
+    const monthsElapsed = (startDt.getFullYear() - origDate.getFullYear()) * 12 + 
+                         (startDt.getMonth() - origDate.getMonth()) +
+                         (startDt.getDate() < origDate.getDate() ? -1 : 0);
+    const monthsRemaining = Math.max(0, (loan.TermMonths || 0) - monthsElapsed);
+    remainingPeriods = Math.max(0, Math.round((monthsRemaining * ppy) / 12));
+  }
+
+  // fixedBasePI: if using fixed payments, compute PI from ORIGINAL principal & term
+  let fixedBasePI = 0;
+  if (usesFixedPayment) {
+    if (typeof loan.OriginalPrincipal === 'number' && loan.TermMonths > 0) {
+      // Always use original amortization for fixed payment loans
+      const origPeriods = Math.max(1, Math.round((loan.TermMonths * ppy) / 12));
+      fixedBasePI = amortizedPayment(loan.OriginalPrincipal, loan.APR, origPeriods, ppy);
+    } else {
+      // Fallback to current balance and remaining term if original terms not available
+      const n = remainingPeriods > 0 ? remainingPeriods : Math.max(1, Math.round((loan.TermMonths * ppy) / 12));
+      fixedBasePI = amortizedPayment(balanceStart ?? 0, loan.APR, n, ppy);
+    }
+  }
+
+  // Generate base payment schedule events
+  let date = new Date(startDate);
+  date = nextByFreq(date, freq);
+  // For fixed payment loans, always generate full remaining schedule
+  const periodsToProject = remainingPeriods > 0 ? remainingPeriods : ppy * maxYears;
+  for (let i = 0; i < periodsToProject; i++) {
+    if (date > endDate) break;
+    events.push({ type: 'base', date: new Date(date) });
+    date = nextByFreq(date, freq);
+  }
+
+  // Draws (future ones only)
+  for (const d of draws.filter((x) => x.LoanRef === loan.id)) {
+    const dd = parseISO(d.DrawDate || d.PaymentDate || d.date || d.Date || d.when || startDate);
+    if (dd > startDate) events.push({ type: 'draw', date: dd, amount: round2(d.Amount || 0) });
+  }
+
+  // Extras rules → materialize into dated events
+  for (const r of extras) {
+    if (!r || !(r.amount > 0)) continue;
+    if (r.kind === 'once') {
+      const when = parseISO(r.date || startDate);
+      if (when > startDate) events.push({ type: 'extra', date: when, amount: round2(r.amount) });
+    } else {
+      const ef = r.every || 'month';
+      let when = parseISO(r.start || toISODate(startDate));
+      if (when < startDate) when = new Date(startDate);
+      for (let i = 0; i < (EXTRA_FREQ[ef] || 12) * maxYears; i++) {
+        if (when > endDate) break;
+        events.push({ type: 'extra', date: new Date(when), amount: round2(r.amount) });
+        if (ef === 'day') when = addDays(when, 1);
+        else if (ef === 'week') when = addDays(when, 7);
+        else if (ef === 'month') when = addMonths(when, 1);
+        else if (ef === 'year') when = addYears(when, 1);
+      }
+    }
+  }
+
+  // Sort events by date; on same day, apply draws first, then extras, then base payment
+  events.sort((a, b) => a.date - b.date || (a.type === 'draw' ? -1 : a.type === 'extra' ? 0 : 1));
+
+  // Iterate through events to build amortization timeline
+  let bal = balanceStart ?? 0;
+  let lastDate = new Date(startDate);
+  let totalInterest = 0;
+  let totalPrincipal = 0;
+  let totalPaid = 0;
+  const timeline = [];
+
+  for (let i = 0; i < events.length; i++) {
+    const ev = events[i];
+    const days = daysBetween(lastDate, ev.date);
+    // Daily interest calculation
+    const interestAccrued = round2(bal * (loan.APR ?? 0) / 365 * days);
+    bal = round2(bal + interestAccrued);
+
+    if (ev.type === 'draw') {
+      bal = round2(bal + (ev.amount || 0));
+    } else {
+      // Calculate total payment amount including any same-day events
+      let payAmt = 0;
+      let sameDayEvents = [ev];
+      while (i + 1 < events.length && toISODate(events[i + 1].date) === toISODate(ev.date) && events[i + 1].type !== 'draw') {
+        i++;
+        sameDayEvents.push(events[i]);
+      }
+
+      // Process each event type for the day
+      let basePayment = 0;
+      let extrasTotal = 0;
+      for (const e of sameDayEvents) {
+        if (e.type === 'base') {
+          if (amortized) {
+            basePayment += round2(fixedBasePI + escrowPerPeriod);
+          } else if ((loan.LoanType || '') === 'Revolving LOC') {
+            const io = round2((loan.APR || 0) / ppy * bal);
+            basePayment += round2(io + escrowPerPeriod);
+          } else if ((loan.LoanType || '') === 'Credit Card') {
+            const monthlyMin = Math.max(round2(bal * 0.02), 25);
+            basePayment += round2((monthlyMin * 12) / ppy + escrowPerPeriod);
+          } else {
+            const nPeriods = Math.max(1, Math.round((loan.TermMonths * ppy) / 12));
+            const dyn = amortizedPayment(bal, loan.APR, nPeriods, ppy);
+            basePayment += round2(dyn + escrowPerPeriod);
+          }
+        } else if (e.type === 'extra') {
+          extrasTotal += round2(e.amount || 0);
+        }
+      }
+
+      // Apply base payment: interest first, then principal. Extras apply to principal only.
+      const interestFromBase = Math.min(basePayment, interestAccrued);
+      const basePrincipal = Math.max(0, round2(basePayment - interestFromBase));
+      const extrasPrincipal = round2(extrasTotal); // extras are principal-only by design
+
+      totalInterest = round2(totalInterest + interestFromBase);
+      totalPrincipal = round2(totalPrincipal + basePrincipal + extrasPrincipal);
+      totalPaid = round2(totalPaid + basePayment + extrasPrincipal);
+
+      // Balance already included interestAccrued earlier; subtract only principal reductions
+      bal = round2(Math.max(0, bal - basePrincipal - extrasPrincipal));
+    }
+
+    timeline.push({
+      date: toISODate(ev.date),
+      balance: bal,
+      paid: round2(totalPaid),
+      interestPaid: round2(totalInterest),
+      principalPaid: round2(totalPrincipal)
+    });
+
+    lastDate = ev.date;
+    if (bal <= 0) break;
+  }
+
+  const payoffDate = timeline.length ? timeline[timeline.length - 1].date : null;
+  return { 
+    timeline, 
+    payoffDate, 
+    totals: { 
+      totalPaid: round2(totalPaid), 
+      totalInterest: round2(totalInterest), 
+      totalPrincipal: round2(totalPrincipal) 
+    }, 
+    balanceEnd: round2(bal)
+  };
+}
+
+// Simple standard amortization schedule generator
+// Returns { schedule: [{date, payment, interest, principal, balance, paid, interestPaid, principalPaid}], payoffDate, totals }
+function computeStandardAmortization(loan, balanceStart, startDate, maxYears = 100) {
+  const freq = loan.PaymentFrequency || 'Monthly';
+  const ppy = periodsPerYear(freq);
+  const schedule = [];
+  let bal = round2(balanceStart ?? 0);
+  if (bal <= 0) return { schedule: [], payoffDate: null, totals: { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 } };
+
+  // Determine remaining periods
+  let remainingPeriods = null;
+  if (loan.TermMonths && loan.OriginationDate) {
+    const orig = parseISO(loan.OriginationDate);
+    const origDate = new Date(orig);
+    const startDt = new Date(startDate);
+    const monthsElapsed = (startDt.getFullYear() - origDate.getFullYear()) * 12 + 
+                          (startDt.getMonth() - origDate.getMonth()) +
+                          (startDt.getDate() < origDate.getDate() ? -1 : 0);
+    const monthsRemaining = Math.max(0, (loan.TermMonths || 0) - monthsElapsed);
+    remainingPeriods = Math.max(0, Math.round((monthsRemaining * ppy) / 12));
+  }
+  if (!remainingPeriods || remainingPeriods <= 0) {
+    // fallback to full term if remaining not computable
+    remainingPeriods = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
+  }
+
+  // Periodic rate
+  const r = (loan.APR || 0) / ppy;
+
+  // Payment: standard amortization based on current balance and remaining periods
+  let payment = amortizedPayment(bal, loan.APR, remainingPeriods, ppy);
+
+  // Start on next scheduled payment date
+  let date = nextByFreq(new Date(startDate), freq);
+
+  let totalPaid = 0;
+  let totalInterest = 0;
+  let totalPrincipal = 0;
+
+  for (let i = 0; i < remainingPeriods && i < ppy * maxYears; i++) {
+    // interest for period
+    const interest = round2(bal * r);
+    // adjust payment for final period if necessary
+    let actualPayment = payment;
+    if (round2(bal + interest) <= payment) {
+      actualPayment = round2(bal + interest);
+    }
+    const principal = Math.max(0, round2(actualPayment - interest));
+    totalInterest = round2(totalInterest + interest);
+    totalPrincipal = round2(totalPrincipal + principal);
+    totalPaid = round2(totalPaid + actualPayment);
+    bal = round2(Math.max(0, bal - principal));
+
+    schedule.push({
+      date: toISODate(date),
+      payment: actualPayment,
+      interest,
+      principal,
+      balance: bal,
+      paid: totalPaid,
+      interestPaid: totalInterest,
+      principalPaid: totalPrincipal,
+    });
+
+    if (bal <= 0) break;
+    date = nextByFreq(date, freq);
+  }
+
+  const payoffDate = schedule.length ? schedule[schedule.length - 1].date : null;
+  return { schedule, payoffDate, totals: { totalPaid: round2(totalPaid), totalInterest: round2(totalInterest), totalPrincipal: round2(totalPrincipal) } };
+}
+
+function aggregateTimeline(timeline, mode = 'monthly') {
+  if (!Array.isArray(timeline) || timeline.length === 0) return [];
+  // mode: 'monthly' | 'yearly'
+  const agg = new Map();
+  let lastPaid = 0;
+  let lastInterest = 0;
+  let lastPrincipal = 0;
+
+  for (let i = 0; i < timeline.length; i++) {
+    const t = timeline[i];
+    if (!t || !t.date) continue;
+    const key = mode === 'yearly' ? t.date.slice(0, 4) : t.date.slice(0, 7); // YYYY or YYYY-MM
+
+    if (!agg.has(key)) {
+      agg.set(key, {
+        period: key,
+        paid: 0,
+        interest: 0,
+        principal: 0,
+        balance: t.balance,
+      });
+    }
+
+    const obj = agg.get(key);
+    const currentPaid = typeof t.paid === 'number' ? t.paid : lastPaid;
+    const currentInterest = typeof t.interestPaid === 'number' ? t.interestPaid : lastInterest;
+    const currentPrincipal = typeof t.principalPaid === 'number' ? t.principalPaid : lastPrincipal;
+
+    const paidDiff = round2(currentPaid - lastPaid);
+    const interestDiff = round2(currentInterest - lastInterest);
+    const principalDiff = round2(currentPrincipal - lastPrincipal);
+
+    obj.paid = round2(obj.paid + paidDiff);
+    obj.interest = round2(obj.interest + interestDiff);
+    obj.principal = round2(obj.principal + principalDiff);
+    obj.balance = t.balance;
+
+    lastPaid = currentPaid;
+    lastInterest = currentInterest;
+    lastPrincipal = currentPrincipal;
+  }
+
+  return Array.from(agg.values())
+    .sort((a, b) => a.period.localeCompare(b.period));
+}
+
+function formatDuration(days) {
+  if (!Number.isFinite(days) || days <= 0) return '';
+  if (days < 30) {
+    const d = Math.round(days);
+    return d + ' day' + (d === 1 ? '' : 's');
+  }
+  const months = Math.round(days / 30);
+  if (months < 12) {
+    return months + ' mo' + (months === 1 ? '' : 's');
+  }
+  const years = Math.floor(months / 12);
+  const remMonths = months % 12;
+  const parts = [];
+  if (years > 0) parts.push(years + ' yr' + (years === 1 ? '' : 's'));
+  if (remMonths > 0) parts.push(remMonths + ' mo' + (remMonths === 1 ? '' : 's'));
+  return parts.join(' ');
+}
+
+// =============================
+// Dev Self-Tests (run in console)
+// =============================
+function runSelfTests() {
+  try {
+    // Per-diem tests
+    console.assert(nearlyEqual(calcPerDiem(0, 1000), 0), 'Per-diem should be 0 when APR=0');
+    console.assert(nearlyEqual(calcPerDiem(0.06, 100000), 0.06/365*100000), 'Per-diem formula mismatch');
+
+    // Payoff tests
+    const payoff = calcPayoff(50000, 0.05, 10);
+    const expected = round2(50000 + (0.05/365*50000)*10);
+    console.assert(nearlyEqual(payoff, expected), 'Payoff calculation mismatch');
+    console.assert(calcPayoff(-10, 0.1, 5) === 0, 'Negative payoff should clamp to 0');
+
+    // Recalc tests (one simple loan, two payments, daily interest)
+    const loan = { id: 1, OriginalPrincipal: 1000, APR: 0.10, OriginationDate: '2024-01-01', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 12 };
+    const pmts = [
+      { id: 1, LoanRef: 1, PaymentDate: '2024-01-11', Amount: 100 }, // 10 days interest @10% on 1000 ≈ 2.74
+      { id: 2, LoanRef: 1, PaymentDate: '2024-01-21', Amount: 100 }, // next 10 days on new balance
+    ];
+    const res = recalcLoanPayments(loan, pmts, []);
+    console.assert(res[0].InterestPortion >= 2.73 && res[0].InterestPortion <= 2.75, 'Recalc interest #1');
+    console.assert(res[0].PrincipalPortion > 97, 'Recalc principal #1 positivity');
+
+    // Periodic payments by type
+    console.assert(nearlyEqual(amortizedPayment(1200, 0, 12, 12), 100), 'Zero-APR amortized');
+    const mp = principalInterestPaymentFor(100000, 0.06, 360, 'Monthly', 'Mortgage');
+    console.assert(mp > 599 && mp < 601, '30yr @6% ~ $599.55 PI');
+    const io = principalInterestPaymentFor(100000, 0.06, 360, 'Monthly', 'Revolving LOC');
+    console.assert(nearlyEqual(io, round2(0.06/12*100000)), 'Interest-only monthly');
+
+    // Scheduled payment w/ escrow monthly (legacy balance-based path keeps working if OriginalPrincipal missing)
+    const loanEsc = { APR: 0, TermMonths: 12, PaymentFrequency: 'Monthly', LoanType: 'Mortgage', EscrowMonthly: 300 };
+    const schedM = scheduledPaymentFor(loanEsc, 12000, 12); // PI=1000, escrow=300 => 1300
+    console.assert(nearlyEqual(schedM, 1300), 'Scheduled monthly w/ escrow should equal PI + escrow periodized');
+
+    // NEW: Fixed PI independent of current balance when OriginalPrincipal present
+    const fixedLoan = { OriginalPrincipal: 12000, APR: 0, TermMonths: 12, PaymentFrequency: 'Monthly', LoanType: 'Mortgage', EscrowMonthly: 300 };
+    const s1 = scheduledPaymentFor(fixedLoan, 12000, 12);
+    const s2 = scheduledPaymentFor(fixedLoan, 9999, 6);
+    console.assert(nearlyEqual(s1, 1300) && nearlyEqual(s2, 1300), 'Fixed PI must not change with balance');
+
+    // Frequency scaling (weekly)
+    const loanW = { APR: 0, TermMonths: 12, PaymentFrequency: 'Weekly', LoanType: 'Mortgage', EscrowMonthly: 520 };
+    const schedW = scheduledPaymentFor(loanW, 12000, 12); // PI=12000/52≈230.77, escrow per week=6240/52=120 => ~350.77
+    console.assert(nearlyEqual(schedW, round2(12000/52 + (520*12/52))), 'Scheduled weekly with escrow scaling');
+
+    // Credit card minimum (weekly scaling from $25 monthly)
+    const ccMinWeekly = scheduledPaymentFor({ LoanType:'Credit Card', APR:0.2, PaymentFrequency:'Weekly', TermMonths:360, EscrowMonthly:0 }, 1000, 360);
+    console.assert(nearlyEqual(ccMinWeekly, round2(25*12/52)), 'Credit card minimum scaled to weekly');
+
+    // Projection payoff improves with extras
+    const baseLoan = { id: 9, OriginalPrincipal: 10000, APR: 0.12, OriginationDate: '2024-01-01', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 60, EscrowMonthly: 0 };
+    const today = new Date('2024-01-01');
+    const projBase = projectToPayoff({ loan: baseLoan, balanceStart: 10000, startDate: today, extras: [], draws: [] });
+    const projExtra = projectToPayoff({ loan: baseLoan, balanceStart: 10000, startDate: today, extras: [{ id:1, kind:'recurring', amount:100, every:'month', start:'2024-01-01' }], draws: [] });
+    console.assert(projExtra.timeline.length <= projBase.timeline.length, 'Extras should not lengthen payoff timeline');
+
+    // Basic mortgage projection sanity check (30-year mortgage should payoff ~30 years from origination)
+    const testMortgage = { id: 20, OriginalPrincipal: 100000, APR: 0.06, OriginationDate: '2024-01-15', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 360, EscrowMonthly: 0, FixedPayment: true };
+    const testProj = projectToPayoff({ loan: testMortgage, balanceStart: 100000, startDate: new Date('2024-01-15'), extras: [], draws: [] });
+    if (testProj.payoffDate) {
+      const year = new Date(testProj.payoffDate).getFullYear();
+      console.assert(year >= 2053 && year <= 2057, 'Test mortgage payoff should be around 2054');
+    }
+
+    // NEW: Projection with zero APR & fixed PI ends in exactly n periods
+    const zLoan = { id: 11, OriginalPrincipal: 1200, APR: 0, OriginationDate: '2024-01-01', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 12, EscrowMonthly: 0 };
+    const projZero = projectToPayoff({ loan: zLoan, balanceStart: 1200, startDate: new Date('2024-01-01'), extras: [], draws: [] });
+    console.assert(projZero.timeline.length === 12, 'Zero-APR 12-month should take 12 payments');
+
+  } catch (e) {
+    console.warn('Self-tests encountered an error (non-fatal):', e);
+  }
+}
+if (typeof window !== 'undefined') runSelfTests();
+
+// =============================
+// UI Component
+// =============================
+export default function LoanManagerMock() {
+  const fmt = (d) => new Date(d).toLocaleDateString();
+  const money = (n) => (n ?? 0).toLocaleString(undefined, { style: 'currency', currency: 'USD' });
+
+  // --- Admin defaults (editable & savable) ---
+  const [admin, setAdmin] = React.useState({
+    graceDaysDefault: 5,
+    lateFeeFlatDefault: 0,
+    lateFeePctDefault: 4,
+    frequencies: ['Monthly', 'Biweekly', 'Weekly', 'Quarterly', 'Annual'],
+  });
+  const [adminDraft, setAdminDraft] = React.useState(null); // when overlay opens for editing
+
+  function openAdmin() {
+    setAdminDraft({
+      graceDaysDefault: String(admin.graceDaysDefault),
+      lateFeeFlatDefault: String(admin.lateFeeFlatDefault),
+      lateFeePctDefault: String(admin.lateFeePctDefault),
+      frequencies: admin.frequencies.join(', '),
+    });
+    setAdminOpen(true);
+  }
+  function saveAdmin() {
+    const freqList = (adminDraft.frequencies || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => Object.keys(FREQ).includes(s));
+    setAdmin({
+      graceDaysDefault: Math.max(0, Number(adminDraft.graceDaysDefault) || 0),
+      lateFeeFlatDefault: Math.max(0, Number(adminDraft.lateFeeFlatDefault) || 0),
+      lateFeePctDefault: Math.max(0, Number(adminDraft.lateFeePctDefault) || 0),
+      frequencies: freqList.length ? freqList : admin.frequencies,
+    });
+    setAdminOpen(false);
+  }
+
+  // --- Sample data ---
+  const initialLoans = [
+    { id: 1, LoanID: 'LN-0001', BorrowerName: 'Test Borrower', LoanType: 'Mortgage', OriginalPrincipal: 100000, OriginationDate: '2024-01-15', TermMonths: 360, APR: 0.065, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-02-15', EscrowMonthly: 300, LateFeeFlat: 0, LateFeePct: 0.04, GraceDays: 5, Status: 'Active', Notes: 'Sample row (delete later)' },
+    { id: 2, LoanID: 'LN-0020', BorrowerName: 'James Garcia', LoanType: 'Mortgage', OriginalPrincipal: 250000, OriginationDate: '2023-06-01', TermMonths: 180, APR: 0.059, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-15', EscrowMonthly: 450, LateFeeFlat: 25, LateFeePct: 0.03, GraceDays: 7, Status: 'Active', Notes: 'Conventional' },
+    { id: 3, LoanID: 'LN-0042', BorrowerName: 'Avery Chen', LoanType: 'Revolving LOC', OriginalPrincipal: 150000, OriginationDate: '2022-11-10', TermMonths: 120, APR: 0.072, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-20', EscrowMonthly: 0, LateFeeFlat: 35, LateFeePct: 0.02, GraceDays: 5, Status: 'Active', Notes: 'Open draw period' },
+  ];
+
+  const initialPayments = [
+    { id: 101, LoanRef: 1, PaymentID: 'PMT-0001', PaymentDate: '2024-02-15', Amount: 700, PrincipalPortion: 200, InterestPortion: 400, EscrowPortion: 100, Method: 'ACH', Reference: 'Sample', PostedBy: 'You', PostedAt: '2024-02-15T10:00:00' },
+    { id: 102, LoanRef: 1, PaymentID: 'PMT-0002', PaymentDate: '2024-03-15', Amount: 700, PrincipalPortion: 210, InterestPortion: 390, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'You', PostedAt: '2024-03-15T10:00:00' },
+    { id: 201, LoanRef: 2, PaymentID: 'PMT-1001', PaymentDate: '2024-08-15', Amount: 2100, PrincipalPortion: 900, InterestPortion: 1100, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'Ops', PostedAt: '2024-08-15T10:00:00' },
+  ];
+
+  const [loans, setLoans] = React.useState(initialLoans);
+  const [payments, setPayments] = React.useState(initialPayments);
+  const [draws, setDraws] = React.useState([]); // {id, LoanRef, DrawDate, Amount}
+
+  const [query, setQuery] = React.useState('');
+  const [selectedId, setSelectedId] = React.useState(loans[0].id);
+  const [mode, setMode] = React.useState('details'); // 'details' | 'calc'
+  const [adminOpen, setAdminOpen] = React.useState(false);
+
+  // Recalc all on mount to normalize any sample rows
+  React.useEffect(() => {
+    setPayments((prev) => recalcAllLoans(loans, prev, draws));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const selected = loans.find((l) => l.id === selectedId);
+  const loanPaymentsDesc = payments
+    .filter((p) => p.LoanRef === selectedId)
+    .sort((a, b) => new Date(b.PaymentDate) - new Date(a.PaymentDate));
+  const loanPaymentsAsc = [...loanPaymentsDesc].reverse();
+
+  const principalPaid = loanPaymentsDesc.reduce((s, p) => s + (p.PrincipalPortion ?? 0), 0);
+  const interestPaid = loanPaymentsDesc.reduce((s, p) => s + (p.InterestPortion ?? 0), 0);
+  const totalPayments = loanPaymentsDesc.reduce((s, p) => s + (p.Amount ?? 0), 0);
+  const balance = Math.max(0, round2((selected.OriginalPrincipal ?? 0) - principalPaid + draws.filter(d => d.LoanRef===selected.id).reduce((s,d)=>s+(d.Amount||0),0)));
+  const lastPayDate = loanPaymentsDesc.length ? parseISO(loanPaymentsAsc[loanPaymentsAsc.length - 1].PaymentDate) : parseISO(selected.OriginationDate);
+  const daysSince = daysBetween(lastPayDate, new Date());
+  const perDiem = calcPerDiem(selected.APR, balance);
+  const payoff = calcPayoff(balance, selected.APR, daysSince);
+
+  // Scheduled payment (P&I + escrow) by frequency & type
+  const scheduledCurrent = scheduledPaymentFor(selected, balance);
+
+  const filteredLoans = loans.filter((l) => !query || l.BorrowerName.toLowerCase().includes(query.toLowerCase()) || l.LoanID.toLowerCase().includes(query.toLowerCase()));
+
+  // Estimate payoff date (forward projection from today with base schedule only)
+  const projectionBase = projectToPayoff({ loan: selected, balanceStart: balance, startDate: new Date(), extras: [], draws: draws });
+  const payoffDateBase = projectionBase.payoffDate;
+
+  // =============================
+  // New Loan Form
+  // =============================
+  const [nlOpen, setNlOpen] = React.useState(false);
+  const [nlBorrower, setNlBorrower] = React.useState('');
+  const [nlPrincipal, setNlPrincipal] = React.useState('');
+  const [nlAPR, setNlAPR] = React.useState(''); // percent input, e.g. 6.5
+  const [nlTerm, setNlTerm] = React.useState('360');
+  const [nlType, setNlType] = React.useState('Mortgage');
+  const [nlStart, setNlStart] = React.useState(toISODate(new Date()));
+  const [nlFreq, setNlFreq] = React.useState('Monthly');
+  const [nlEscrow, setNlEscrow] = React.useState('0');
+  const [nlGrace, setNlGrace] = React.useState('5');
+  const [nlNextDue, setNlNextDue] = React.useState(toISODate(new Date()));
+  const [nlCreditLimit, setNlCreditLimit] = React.useState('');
+  const [nlFixedPayment, setNlFixedPayment] = React.useState(true);
+
+  const nlPpy = periodsPerYear(nlFreq);
+  const estNewPI = (() => {
+    const P = Number(nlPrincipal);
+    const rPct = Number(nlAPR);
+    const n = Number(nlTerm);
+    if (isNaN(P) || P <= 0 || isNaN(rPct) || rPct < 0 || isNaN(n) || n <= 0) return 0;
+    // fixed PI from orig values
+    const tmpLoan = { OriginalPrincipal: P, APR: rPct/100, TermMonths: n, PaymentFrequency: nlFreq, LoanType: nlType };
+    return isAmortizedType(nlType) ? fixedPIForLoan(tmpLoan) : scheduledPaymentFor(tmpLoan, P);
+  })();
+  const estNewEscrowPer = round2(((Number(nlEscrow) || 0) * 12) / nlPpy);
+  const estNewPerLabel = `${nlFreq} Payment (est.)`
+  const estNewPerWithEscrow = round2(estNewPI + estNewEscrowPer);
+
+  function nextLoanKey(existing) {
+    const maxId = Math.max(0, ...existing.map((x) => x.id));
+    const n = maxId + 1;
+    return { id: n, LoanID: `LN-${String(n).padStart(4, '0')}` };
+  }
+
+  function toggleNewLoan() {
+    if (!nlOpen) {
+      // Opening: seed from Admin defaults
+      setNlGrace(String(admin.graceDaysDefault));
+      setNlFreq(admin.frequencies[0] || 'Monthly');
+    }
+    setNlOpen((v) => !v);
+  }
+
+  function createLoan() {
+    const P = Number(nlPrincipal);
+    const rPct = Number(nlAPR); // percent
+    const n = Number(nlTerm);
+    if (!nlBorrower || isNaN(P) || P <= 0 || isNaN(rPct) || rPct < 0 || isNaN(n) || n <= 0) {
+      alert('Please enter Borrower, Principal (>0), APR% (>=0), and Term (>0).');
+      return;
+    }
+    const key = nextLoanKey(loans);
+    const newLoan = {
+      id: key.id,
+      LoanID: key.LoanID,
+      BorrowerName: nlBorrower,
+      LoanType: nlType,
+      OriginalPrincipal: round2(P),
+      OriginationDate: nlStart,
+      TermMonths: n,
+      APR: rPct/100, // convert percent to decimal
+      PaymentFrequency: nlFreq,
+      NextPaymentDate: nlNextDue,
+      EscrowMonthly: Number(nlEscrow) || 0,
+      LateFeeFlat: admin.lateFeeFlatDefault,
+      LateFeePct: admin.lateFeePctDefault / 100,
+      GraceDays: Number(nlGrace) || admin.graceDaysDefault,
+      Status: 'Active',
+      Notes: nlType === 'Revolving LOC' && nlCreditLimit ? `Credit limit: ${nlCreditLimit}` : '',
+      CreditLimit: nlType === 'Revolving LOC' ? Number(nlCreditLimit) || 0 : undefined,
+      FixedPayment: nlFixedPayment,
+    };
+    setLoans((prev) => [...prev, newLoan]);
+    setSelectedId(key.id);
+    setNlBorrower(''); setNlPrincipal(''); setNlAPR(''); setNlTerm('360'); setNlType('Mortgage'); setNlStart(toISODate(new Date())); setNlFreq(admin.frequencies[0] || 'Monthly'); setNlEscrow('0'); setNlGrace(String(admin.graceDaysDefault)); setNlNextDue(toISODate(new Date())); setNlCreditLimit('');
+    setNlOpen(false);
+  }
+
+  // =============================
+  // Inline Edit Loan Details (unlock fields)
+  // =============================
+  const [editMode, setEditMode] = React.useState(false);
+  const [el, setEl] = React.useState({}); // holds editable fields as strings
+  function startEdit() {
+    setEl({
+      BorrowerName: selected.BorrowerName || '',
+      OriginalPrincipal: String(selected.OriginalPrincipal ?? ''),
+      APR: String(round2((selected.APR ?? 0) * 100)),
+      TermMonths: String(selected.TermMonths ?? ''),
+      LoanType: selected.LoanType || 'Mortgage',
+      NextPaymentDate: toISODate(selected.NextPaymentDate),
+      PaymentFrequency: selected.PaymentFrequency || 'Monthly',
+      EscrowMonthly: String(selected.EscrowMonthly ?? ''),
+      GraceDays: String(selected.GraceDays ?? ''),
+      Notes: selected.Notes || '',
+    });
+    setEditMode(true);
+  }
+  function cancelEdit() { setEditMode(false); }
+  function saveEdit() {
+    const rPct = Number(el.APR);
+    const P = Number(el.OriginalPrincipal);
+    const n = Number(el.TermMonths);
+    if (!el.BorrowerName || isNaN(P) || P <= 0 || isNaN(rPct) || rPct < 0 || isNaN(n) || n <= 0) { alert('Check Borrower, Principal (>0), APR% (>=0), Term (>0).'); return; }
+    const updated = {
+      ...selected,
+      BorrowerName: el.BorrowerName,
+      OriginalPrincipal: round2(P),
+      APR: rPct/100,
+      TermMonths: n,
+      LoanType: el.LoanType,
+      NextPaymentDate: el.NextPaymentDate,
+      PaymentFrequency: el.PaymentFrequency,
+      EscrowMonthly: Number(el.EscrowMonthly) || 0,
+      GraceDays: Number(el.GraceDays) || 0,
+      Notes: el.Notes,
+    };
+    setLoans((prev) => prev.map((l) => (l.id === selected.id ? updated : l)));
+    setPayments((prev) => recalcLoanPayments(updated, prev, draws));
+    setEditMode(false);
+  }
+
+  // =============================
+  // Post / Edit / Delete Payments + Draws (for Revolving)
+  // =============================
+  const [pDate, setPDate] = React.useState(toISODate(new Date()));
+  const [pAmt, setPAmt] = React.useState('');
+  const [pScheduled, setPScheduled] = React.useState(scheduledCurrent);
+  const [pExtra, setPExtra] = React.useState('');
+  const [pMethod, setPMethod] = React.useState('ACH');
+  const [pRef, setPRef] = React.useState('');
+
+  // Prefill when switching loans or changing schedule
+  React.useEffect(() => {
+    const sched = scheduledPaymentFor(selected, balance);
+    setPScheduled(sched);
+    setPAmt(String(sched || ''));
+    setPExtra('');
+  }, [selectedId, selected.APR, selected.TermMonths, selected.PaymentFrequency, selected.LoanType, selected.EscrowMonthly, balance]);
+
+  function handleAmountChange(v) {
+    setPAmt(v);
+    const amt = Number(v);
+    const extra = Math.max(0, round2(amt - (pScheduled || 0)));
+    setPExtra(extra ? String(extra) : '');
+  }
+  function handleExtraChange(v) {
+    setPExtra(v);
+    const extra = Number(v) || 0;
+    const newAmt = round2((pScheduled || 0) + extra);
+    setPAmt(String(newAmt));
+  }
+
+  function postPayment() {
+    const amt = Number(pAmt);
+    if (!selected) return;
+    if (!pDate || isNaN(amt) || amt <= 0) { alert('Enter a valid amount and date.'); return; }
+
+    const nextId = Math.max(0, ...payments.map((x) => x.id)) + 1;
+    const newRow = {
+      id: nextId,
+      LoanRef: selected.id,
+      PaymentID: `PMT-${String(nextId).padStart(4, '0')}`,
+      PaymentDate: pDate,
+      Amount: round2(amt),
+      PrincipalPortion: 0,
+      InterestPortion: 0,
+      EscrowPortion: 0,
+      Method: pMethod,
+      Reference: pRef,
+      PostedBy: 'You',
+      PostedAt: new Date().toISOString(),
+    };
+    setPayments((prev) => {
+      const withNew = [newRow, ...prev];
+      return recalcLoanPayments(selected, withNew, draws);
+    });
+    setPAmt(String(pScheduled || ''));
+    setPExtra('');
+    setPRef('');
+  }
+
+  // Inline edit state for payments
+  const [editId, setEditId] = React.useState(null);
+  const [eDate, setEDate] = React.useState('');
+  const [eAmt, setEAmt] = React.useState('');
+  const [eMethod, setEMethod] = React.useState('ACH');
+  const [eRef, setERef] = React.useState('');
+
+  function startEditPayment(p) {
+    setEditId(p.id);
+    setEDate(toISODate(p.PaymentDate));
+    setEAmt(String(p.Amount ?? ''));
+    setEMethod(p.Method || 'ACH');
+    setERef(p.Reference || '');
+  }
+  function cancelEditPayment() { setEditId(null); }
+
+  function saveEditPayment(p) {
+    const amt = Number(eAmt);
+    if (!eDate || isNaN(amt) || amt <= 0) { alert('Enter a valid amount and date.'); return; }
+    setPayments((prev) => {
+      const updated = prev.map((row) => row.id === p.id ? { ...row, PaymentDate: eDate, Amount: round2(amt), Method: eMethod, Reference: eRef } : row);
+      const loan = loans.find((l) => l.id === p.LoanRef);
+      return recalcLoanPayments(loan, updated, draws);
+    });
+    setEditId(null);
+  }
+
+  function deletePayment(p) {
+    if (!confirm('Delete this payment?')) return;
+    setPayments((prev) => {
+      const filtered = prev.filter((row) => row.id !== p.id);
+      const loan = loans.find((l) => l.id === p.LoanRef);
+      return recalcLoanPayments(loan, filtered, draws);
+    });
+  }
+
+  // Draws (Revolving LOC only)
+  const isRevolving = selected.LoanType === 'Revolving LOC';
+  const [drawOpen, setDrawOpen] = React.useState(false);
+  const [drawDate, setDrawDate] = React.useState(toISODate(new Date()));
+  const [drawAmt, setDrawAmt] = React.useState('');
+  function addDraw() {
+    const amt = Number(drawAmt);
+    if (!drawDate || isNaN(amt) || amt <= 0) { alert('Enter a valid draw date and amount.'); return; }
+    const id = Math.max(0, ...draws.map((d) => d.id || 0)) + 1;
+    const newDraw = { id, LoanRef: selected.id, DrawDate: drawDate, Amount: round2(amt) };
+    setDraws((prev) => [...prev, newDraw]);
+    setPayments((prev) => recalcLoanPayments(selected, prev, [...draws, newDraw]));
+    setDrawAmt('');
+  }
+  function deleteDraw(id) {
+    setDraws((prev) => prev.filter((d) => d.id !== id));
+    setPayments((prev) => recalcLoanPayments(selected, prev, draws.filter((d) => d.id !== id)));
+  }
+
+  // =============================
+  // Calculator (what-if extras)
+  // =============================
+  const [calcExtras, setCalcExtras] = React.useState([
+    // { id, kind: 'recurring', amount, every: 'month'|'week'|'day'|'year', start },
+    // { id, kind: 'once', amount, date }
+  ]);
+  const [calcAggMode, setCalcAggMode] = React.useState('monthly'); // 'monthly' | 'yearly'
+
+  function addCalcExtra(kind = 'recurring') {
+    const id = Math.max(0, ...calcExtras.map((x) => x.id || 0)) + 1;
+    if (kind === 'recurring') setCalcExtras((p) => [...p, { id, kind: 'recurring', amount: 0, every: 'month', start: toISODate(new Date()) }]);
+    else setCalcExtras((p) => [...p, { id, kind: 'once', amount: 0, date: toISODate(new Date()) }]);
+  }
+  function updateCalcExtra(id, patch) { setCalcExtras((p) => p.map((x) => x.id === id ? { ...x, ...patch } : x)); }
+  function removeCalcExtra(id) { setCalcExtras((p) => p.filter((x) => x.id !== id)); }
+
+  // Standard amortization schedule without extras (baseline)
+  const standardAmort = React.useMemo(() => computeStandardAmortization(selected, balance, new Date()), [selected, balance]);
+
+  // Projection for calculator view (includes extras)
+  const calcProjection = React.useMemo(() => projectToPayoff({ loan: selected, balanceStart: balance, startDate: new Date(), extras: calcExtras, draws }), [selected, balance, calcExtras, draws]);
+
+  const calcTimeline = React.useMemo(() => {
+    const timeline = calcProjection?.timeline;
+    if (timeline && timeline.length) {
+      return timeline.map((entry) => ({
+        date: entry.date,
+        balance: entry.balance,
+        paid: entry.paid,
+        interestPaid: entry.interestPaid,
+        principalPaid: entry.principalPaid,
+      }));
+    }
+    const fallback = standardAmort.schedule || [];
+    return fallback.map((entry) => ({
+      date: entry.date,
+      balance: entry.balance,
+      paid: entry.paid,
+      interestPaid: entry.interestPaid,
+      principalPaid: entry.principalPaid,
+    }));
+  }, [calcProjection, standardAmort]);
+
+  const calcAgg = React.useMemo(() => aggregateTimeline(calcTimeline, calcAggMode), [calcTimeline, calcAggMode]);
+
+  const projectionTotals = calcProjection?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
+  const baseTotals = projectionBase?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
+  const lifetimePaidWithExtras = round2(totalPayments + projectionTotals.totalPaid);
+  const lifetimePaidBase = round2(totalPayments + baseTotals.totalPaid);
+  const lifetimeSavings = round2(lifetimePaidBase - lifetimePaidWithExtras);
+  const interestSaved = round2(baseTotals.totalInterest - projectionTotals.totalInterest);
+  const timeSavedDays = payoffDateBase && calcProjection?.payoffDate ? daysBetween(calcProjection.payoffDate, payoffDateBase) : 0;
+  const timeSavedLabel = timeSavedDays > 0 ? formatDuration(timeSavedDays) : 'N/A';
+  const futureInterestLabel = money(projectionTotals.totalInterest);
+  const futurePrincipalLabel = money(projectionTotals.totalPrincipal);
+  const lifetimePaidLabel = money(lifetimePaidWithExtras);
+  const interestSavedLabel = Math.abs(interestSaved) > EPS ? money(interestSaved) : 'N/A';
+  const lifetimeSavingsLabel = Math.abs(lifetimeSavings) > EPS ? money(lifetimeSavings) : 'N/A';
+  return (
+    <div className="min-h-screen bg-gray-50 text-gray-600">
+      {/* Header */}
+      <div className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
+        <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-3">
+          <div className="shrink-0 rounded-xl bg-violet-600 px-3 py-1 text-white font-semibold">Loan Manager</div>
+
+          {/* Header buttons */}
+          <button onClick={openAdmin} className="text-xs rounded-md border px-3 py-1">Admin</button>
+
+          <input
+            className="ml-auto w-72 rounded-xl border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+            placeholder="Search borrower or Loan ID"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </div>
+      </div>
+
+      {/* Admin overlay (editable & savable) */}
+      {adminOpen && (
+        <div className="fixed inset-0 z-20 bg-gray-500/20 flex items-center justify-center">
+          <div className="w-[760px] max-w-[92vw] rounded-2xl bg-white shadow-xl border p-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="font-semibold">Admin Settings</div>
+              <div className="flex gap-2">
+                <button onClick={saveAdmin} className="text-xs rounded-md bg-violet-600 text-white px-3 py-1">Save</button>
+                <button onClick={() => setAdminOpen(false)} className="text-xs rounded-md border px-3 py-1">Close</button>
+              </div>
+            </div>
+            {!!adminDraft && (
+              <div className="grid sm:grid-cols-2 gap-3 text-sm">
+                <FormRow label="Grace days (default)">
+                  <input type="number" min={0} value={adminDraft.graceDaysDefault} onChange={(e)=>setAdminDraft({...adminDraft,graceDaysDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                </FormRow>
+                <FormRow label="Late fee flat (default)">
+                  <input type="number" min={0} step="0.01" value={adminDraft.lateFeeFlatDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeeFlatDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                </FormRow>
+                <FormRow label="Late fee % (default)">
+                  <input type="number" min={0} step="0.01" value={adminDraft.lateFeePctDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeePctDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                </FormRow>
+                <FormRow label="Frequencies (comma-separated)">
+                  <input value={adminDraft.frequencies} onChange={(e)=>setAdminDraft({...adminDraft,frequencies:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                </FormRow>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Main layout */}
+      <div className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* Left: Loans list + New Loan */}
+        <div className="lg:col-span-1 space-y-6">
+          {/* New Loan Card */}
+          <div className="rounded-2xl bg-white shadow-sm border">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <div className="font-semibold">New Loan</div>
+              <button onClick={toggleNewLoan} className="text-xs text-gray-600">{nlOpen ? 'Hide' : 'Show'}</button>
+            </div>
+            {nlOpen && (
+              <div className="p-4 grid grid-cols-2 gap-3 text-sm">
+                <div className="col-span-2">
+                  <label className="block text-xs text-gray-600 mb-1">Borrower</label>
+                  <input value={nlBorrower} onChange={(e)=>setNlBorrower(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Full name" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Principal</label>
+                  <input type="number" min="0" step="0.01" value={nlPrincipal} onChange={(e)=>setNlPrincipal(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">APR % (e.g. 6.50)</label>
+                  <input type="number" min="0" step="0.01" value={nlAPR} onChange={(e)=>setNlAPR(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Term (months)</label>
+                  <input type="number" min="1" step="1" value={nlTerm} onChange={(e)=>setNlTerm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Type</label>
+                  <select value={nlType} onChange={(e)=>setNlType(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                    {['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card'].map(t => <option key={t} value={t}>{t}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="inline-flex items-center mt-2">
+                    <input type="checkbox" checked={nlFixedPayment} onChange={(e)=>setNlFixedPayment(e.target.checked)} className="mr-2" />
+                    <span className="text-xs text-gray-600">Fixed payment</span>
+                  </label>
+                </div>
+                {nlType === 'Revolving LOC' && (
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Credit Limit</label>
+                    <input type="number" min="0" step="0.01" value={nlCreditLimit} onChange={(e)=>setNlCreditLimit(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                  </div>
+                )}
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Origination Date</label>
+                  <input type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Next Payment Date</label>
+                  <input type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Frequency</label>
+                  <select value={nlFreq} onChange={(e)=>setNlFreq(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                    {admin.frequencies.map(f => <option key={f} value={f}>{f}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Escrow (monthly)</label>
+                  <input type="number" min="0" step="0.01" value={nlEscrow} onChange={(e)=>setNlEscrow(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Grace Days</label>
+                  <input type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+                <div className="col-span-2 flex items-center justify-between">
+                  <div className="text-xs text-gray-600">{estNewPerLabel}</div>
+                  <div className="font-semibold">{money(estNewPerWithEscrow)}</div>
+                </div>
+                <div className="col-span-2 flex justify-end">
+                  <button onClick={createLoan} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Create Loan</button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Loans list */}
+          <div className="rounded-2xl bg-white shadow-sm border">
+            <div className="px-4 py-3 border-b flex items-center justify-between">
+              <div className="font-semibold">Loans</div>
+              <div className="text-xs text-gray-500">{filteredLoans.length} shown</div>
+            </div>
+            <ul className="divide-y">
+              {filteredLoans.map((l) => (
+                <li key={l.id} onClick={() => setSelectedId(l.id)} className={`px-4 py-3 cursor-pointer hover:bg-violet-50 ${selectedId === l.id ? 'bg-violet-50' : ''}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="font-medium">{l.BorrowerName}</div>
+                    <div className="text-xs text-gray-500">{l.LoanID}</div>
+                  </div>
+                  <div className="text-sm text-gray-600">{money(l.OriginalPrincipal)} @ {(l.APR * 100).toFixed(2)}%</div>
+                  <div className="text-xs text-gray-500">Next due: {fmt(l.NextPaymentDate)}</div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+
+        {/* Right: Details or Calculator */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Header with view switch */}
+          <div className="flex items-center gap-2">
+            <button onClick={() => setMode('details')} className={`rounded-full px-4 py-2 text-sm border ${mode==='details' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Loan Details</button>
+            <button onClick={() => setMode('calc')} className={`rounded-full px-4 py-2 text-sm border ${mode==='calc' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Calculator</button>
+          </div>
+
+          {mode === 'details' ? (
+            <>
+              {/* Summary card */}
+              <div className="rounded-2xl bg-white shadow-sm border">
+                <div className="px-4 py-3 border-b flex items-center justify-between">
+                  <div className="font-semibold">Loan Details</div>
+                  <div className="flex items-center gap-3">
+                    <div className="text-sm text-gray-600">{(selected.PaymentFrequency || 'Monthly')} Payment (est.): <span className="font-semibold">{money(scheduledCurrent)}</span></div>
+                    {editMode ? (
+                      <div className="flex items-center gap-2">
+                        <button onClick={saveEdit} className="text-xs rounded-md bg-violet-600 text-white px-3 py-1">Save</button>
+                        <button onClick={cancelEdit} className="text-xs rounded-md border px-3 py-1">Cancel</button>
+                      </div>
+                    ) : (
+                      <button onClick={startEdit} className="text-xs rounded-md border px-3 py-1">Edit Details</button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Details grid (editable when editMode) */}
+                <div className="p-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
+                  <Editable label="Borrower" value={selected.BorrowerName} edit={editMode} onChange={(v)=>setEl(s=>({...s,BorrowerName:v}))} />
+                  <Readonly label="Loan ID" value={selected.LoanID} />
+                  <EditableSelect label="Type" value={selected.LoanType} options={['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card']} edit={editMode} onChange={(v)=>setEl(s=>({...s,LoanType:v}))} />
+                  <EditableNumber label="Original Principal" value={selected.OriginalPrincipal} edit={editMode} onChange={(v)=>setEl(s=>({...s,OriginalPrincipal:v}))} />
+                  <EditableNumber label="APR %" value={round2((selected.APR||0)*100)} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,APR:v}))} />
+                  <EditableNumber label="Term (months)" value={selected.TermMonths} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,TermMonths:v}))} />
+                  <Readonly label="Originated" value={fmt(selected.OriginationDate)} />
+                  <EditableDate label="Next Payment" value={toISODate(selected.NextPaymentDate)} edit={editMode} onChange={(v)=>setEl(s=>({...s,NextPaymentDate:v}))} />
+                  <EditableSelect label="Frequency" value={selected.PaymentFrequency} options={admin.frequencies} edit={editMode} onChange={(v)=>setEl(s=>({...s,PaymentFrequency:v}))} />
+                  <EditableNumber label="Escrow (mo)" value={selected.EscrowMonthly} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,EscrowMonthly:v}))} />
+                  <EditableNumber label="Grace Days" value={selected.GraceDays} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,GraceDays:v}))} />
+                  <EditableTextArea label="Notes" value={selected.Notes} edit={editMode} onChange={(v)=>setEl(s=>({...s,Notes:v}))} />
+                </div>
+
+                {/* Purple stats */}
+                <div className="px-4 pb-4">
+                  <div className="rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    <Stat label="Current Balance (est.)" value={money(balance)} />
+                    <Stat label="Daily Interest (per-diem)" value={`${money(Math.max(0, perDiem))}/day`} />
+                    <Stat label="Estimated Payoff" value={money(payoff)} />
+                    <Stat label="Principal Paid" value={money(principalPaid)} />
+                    <Stat label="Interest Paid" value={money(interestPaid)} />
+                    <Stat label="Total Payments" value={money(totalPayments)} />
+                    <Stat label="Projected Payoff Date" value={payoffDateBase ? fmt(payoffDateBase) : '—'} />
+                  </div>
+                </div>
+              </div>
+
+              {/* Payments history + Post/Edit/Delete (+ Draws for Revolving) */}
+              <div className="rounded-2xl bg-white shadow-sm border">
+                <div className="px-4 py-3 border-b flex items-center justify-between">
+                  <div className="font-semibold">Payments</div>
+                  <div className="text-xs text-gray-500">{loanPaymentsDesc.length} records</div>
+                </div>
+                <div className="overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600">
+                      <tr>
+                        <Th>Date</Th>
+                        <Th>Amount</Th>
+                        <Th>Principal</Th>
+                        <Th>Interest</Th>
+                        <Th>Escrow</Th>
+                        <Th>Method</Th>
+                        <Th>Reference</Th>
+                        <Th className="text-right">Actions</Th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {loanPaymentsAsc.map((p) => (
+                        <tr key={p.id} className="hover:bg-gray-50">
+                          <Td>
+                            {editId === p.id ? (
+                              <input type="date" value={eDate} onChange={(e)=>setEDate(e.target.value)} className="rounded-md border px-2 py-1" />
+                            ) : (
+                              fmt(p.PaymentDate)
+                            )}
+                          </Td>
+                          <Td>
+                            {editId === p.id ? (
+                              <input type="number" min="0" step="0.01" value={eAmt} onChange={(e)=>setEAmt(e.target.value)} className="rounded-md border px-2 py-1 w-28" />
+                            ) : (
+                              money(p.Amount)
+                            )}
+                          </Td>
+                          <Td>{p.PrincipalPortion == null ? '—' : money(p.PrincipalPortion)}</Td>
+                          <Td>{p.InterestPortion == null ? '—' : money(p.InterestPortion)}</Td>
+                          <Td>{money(p.EscrowPortion)}</Td>
+                          <Td>
+                            {editId === p.id ? (
+                              <select value={eMethod} onChange={(e)=>setEMethod(e.target.value)} className="rounded-md border px-2 py-1">
+                                {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                            ) : (
+                              p.Method
+                            )}
+                          </Td>
+                          <Td>
+                            {editId === p.id ? (
+                              <input value={eRef} onChange={(e)=>setERef(e.target.value)} className="rounded-md border px-2 py-1" />
+                            ) : (
+                              p.Reference || ''
+                            )}
+                          </Td>
+                          <Td>
+                            <div className="flex gap-2 justify-end">
+                              {editId === p.id ? (
+                                <>
+                                  <button onClick={()=>saveEditPayment(p)} className="px-2 py-1 rounded-md bg-violet-600 text-white text-xs">Save</button>
+                                  <button onClick={cancelEditPayment} className="px-2 py-1 rounded-md border text-xs">Cancel</button>
+                                </>
+                              ) : (
+                                <>
+                                  <button onClick={()=>startEditPayment(p)} className="px-2 py-1 rounded-md border text-xs">Edit</button>
+                                  <button onClick={()=>deletePayment(p)} className="px-2 py-1 rounded-md border text-xs text-red-600">Delete</button>
+                                </>
+                              )}
+                            </div>
+                          </Td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                {/* Post payment panel */}
+                <div className="border-t p-4 grid md:grid-cols-6 gap-3">
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Payment date</label>
+                    <input type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                    <input type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                    <div className="text-[11px] text-gray-500 mt-1">Prefilled with {selected.PaymentFrequency || 'Monthly'}: {money(pScheduled || 0)}</div>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
+                    <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-gray-600 mb-1">Method</label>
+                    <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                      {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
+                    </select>
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="block text-xs text-gray-600 mb-1">Reference</label>
+                    <input value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
+                  </div>
+                  <div className="md:col-span-6 flex items-center justify-between">
+                    {isRevolving && (
+                      <button onClick={() => setDrawOpen((v)=>!v)} className="rounded-xl border px-4 py-2 text-sm">{drawOpen ? 'Hide Draws' : 'Draws'}</button>
+                    )}
+                    <button onClick={postPayment} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Post Payment</button>
+                  </div>
+
+                  {drawOpen && isRevolving && (
+                    <div className="md:col-span-6 rounded-xl border p-3">
+                      <div className="font-semibold mb-2">Add Draw (Revolving LOC)</div>
+                      <div className="grid sm:grid-cols-4 gap-2 items-end">
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">Draw date</label>
+                          <input type="date" value={drawDate} onChange={(e)=>setDrawDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                        </div>
+                        <div>
+                          <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                          <input type="number" min="0" step="0.01" value={drawAmt} onChange={(e)=>setDrawAmt(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                        </div>
+                        <div className="sm:col-span-2 flex gap-2">
+                          <button onClick={addDraw} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold">Add Draw</button>
+                        </div>
+                      </div>
+                      <div className="mt-3 text-sm">
+                        {draws.filter(d=>d.LoanRef===selected.id).length === 0 ? (
+                          <div className="text-gray-500">No draws yet.</div>
+                        ) : (
+                          <ul className="divide-y">
+                            {draws.filter(d=>d.LoanRef===selected.id).sort((a,b)=>new Date(a.DrawDate)-new Date(b.DrawDate)).map(d => (
+                              <li key={d.id} className="py-2 flex items-center justify-between">
+                                <div>{fmt(d.DrawDate)} — {money(d.Amount)}</div>
+                                <button onClick={()=>deleteDraw(d.id)} className="text-xs rounded-md border px-3 py-1">Remove</button>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
+          ) : (
+            // ================= CALCULATOR VIEW =================
+            <>
+              <div className="rounded-2xl bg-white shadow-sm border">
+                <div className="px-4 py-3 border-b flex items-center justify-between">
+                  <div className="font-semibold">What-if Calculator</div>
+                  <div className="text-sm text-gray-600">Base schedule + your extras</div>
+                </div>
+                <div className="p-4 grid md:grid-cols-2 gap-6">
+                  {/* Left: extras config */}
+                  <div>
+                    <div className="font-medium mb-2">Extra Payments</div>
+                    {calcExtras.length === 0 && <div className="text-sm text-gray-500 mb-2">No extras yet.</div>}
+                    <div className="space-y-2">
+                      {calcExtras.map((x) => (
+                        <div key={x.id} className="rounded-xl border p-3 grid sm:grid-cols-6 gap-2 items-end">
+                          <div className="sm:col-span-2">
+                            <label className="block text-xs text-gray-600 mb-1">Type</label>
+                            <select value={x.kind} onChange={(e)=>updateCalcExtra(x.id,{kind:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                              <option value="recurring">Recurring</option>
+                              <option value="once">One-time</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                            <input type="number" min="0" step="0.01" value={x.amount} onChange={(e)=>updateCalcExtra(x.id,{amount:Number(e.target.value)})} className="w-full rounded-xl border px-3 py-2" />
+                          </div>
+                          {x.kind === 'recurring' ? (
+                            <>
+                              <div>
+                                <label className="block text-xs text-gray-600 mb-1">Every</label>
+                                <select value={x.every} onChange={(e)=>updateCalcExtra(x.id,{every:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                                  {['day','week','month','year'].map(o=> <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              </div>
+                              <div className="sm:col-span-2">
+                                <label className="block text-xs text-gray-600 mb-1">Start</label>
+                                <input type="date" value={x.start} onChange={(e)=>updateCalcExtra(x.id,{start:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                              </div>
+                            </>
+                          ) : (
+                            <div className="sm:col-span-3">
+                              <label className="block text-xs text-gray-600 mb-1">Date</label>
+                              <input type="date" value={x.date} onChange={(e)=>updateCalcExtra(x.id,{date:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                            </div>
+                          )}
+                          <div className="sm:col-span-1 flex justify-end">
+                            <button onClick={()=>removeCalcExtra(x.id)} className="rounded-md border px-3 py-2 text-xs">Remove</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <button onClick={()=>addCalcExtra('recurring')} className="rounded-xl border px-4 py-2 text-sm">+ Add Recurring</button>
+                      <button onClick={()=>addCalcExtra('once')} className="rounded-xl border px-4 py-2 text-sm">+ Add One-time</button>
+                    </div>
+                  </div>
+
+                  {/* Right: results */}
+                  <div>
+                    <div className="font-medium mb-2">Modeled Results</div>
+                    <div className=\"rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 gap-6\">
+                      <Stat label=\"Projected Payoff (with extras)\" value={calcProjection?.payoffDate ? fmt(calcProjection.payoffDate) : '-'} />
+                      <Stat label=\"Base Payoff (no extras)\" value={payoffDateBase ? fmt(payoffDateBase) : '-'} />
+                      <Stat label=\"Time Saved vs Base\" value={timeSavedLabel} />
+                      <Stat label=\"Future Interest (with extras)\" value={futureInterestLabel} />
+                      <Stat label=\"Future Principal (with extras)\" value={futurePrincipalLabel} />
+                      <Stat label=\"Interest Saved vs Base\" value={interestSavedLabel} />
+                      <Stat label=\"Lifetime Total Paid (with extras)\" value={lifetimePaidLabel} />
+                      <Stat label=\"Lifetime Savings vs Base\" value={lifetimeSavingsLabel} />
+                    </div>
+                    {/* Line chart */}
+                    <div className="mt-4 h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                {/* Use standard amortization schedule for chart to keep it simple and predictable */}
+                <LineChart data={standardAmort.schedule} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                          <CartesianGrid strokeDasharray="3 3" />
+                          <XAxis dataKey="date" hide={false} tick={{ fontSize: 10 }} />
+                          <YAxis tick={{ fontSize: 10 }} />
+                          <Tooltip />
+                          <Legend />
+                          <Line type="monotone" dataKey="balance" name="Balance" stroke="#8884d8" dot={false} />
+                          <Line type="monotone" dataKey="principalPaid" name="Principal Paid (Cumulative)" stroke="#82ca9d" dot={false} />
+                          <Line type="monotone" dataKey="interestPaid" name="Interest Paid (Cumulative)" stroke="#ff7300" dot={false} />
+                        </LineChart>
+                      </ResponsiveContainer>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Amortization aggregate */}
+                <div className="px-4 pb-4">
+                  <div className="flex items-center justify-between py-2">
+                    <div className="font-medium">Amortization ({calcAggMode})</div>
+                    <div className="flex gap-2 text-sm">
+                      <button onClick={()=>setCalcAggMode('monthly')} className={`rounded-full px-3 py-1 border ${calcAggMode==='monthly'?'bg-violet-600 text-white':'bg-white'}`}>Monthly</button>
+                      <button onClick={()=>setCalcAggMode('yearly')} className={`rounded-full px-3 py-1 border ${calcAggMode==='yearly'?'bg-violet-600 text-white':'bg-white'}`}>Yearly</button>
+                    </div>
+                  </div>
+                  <div className="overflow-auto">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-gray-50 text-gray-600">
+                        <tr>
+                          <Th>Period</Th>
+                          <Th>Total Paid</Th>
+                          <Th>Interest</Th>
+                          <Th>Principal</Th>
+                          <Th>Ending Balance</Th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y">
+                        {calcAgg.map((row) => (
+                          <tr key={row.period} className="hover:bg-gray-50">
+                            <Td>{row.period}</Td>
+                            <Td>{money(row.paid)}</Td>
+                            <Td>{money(row.interest)}</Td>
+                            <Td>{money(row.principal)}</Td>
+                            <Td>{money(row.balance)}</Td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Small UI helpers ----------
+function Info({ label, value }) {
+  return (
+    <div className="rounded-xl border bg-white p-3">
+      <div className="text-[10px] uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="mt-1 font-medium">{value}</div>
+    </div>
+  );
+}
+function Static({ label, value }) {
+  return <Info label={label} value={value} />;
+}
+function Readonly({ label, value }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <div className="rounded-xl border bg-white p-3">{value}</div>
+    </div>
+  );
+}
+function Editable({ label, value, edit, onChange }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      {edit ? (
+        <input defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+      ) : (
+        <div className="rounded-xl border bg-white p-3">{value}</div>
+      )}
+    </div>
+  );
+}
+function EditableNumber({ label, value, step = '0.01', edit, onChange }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      {edit ? (
+        <input type="number" defaultValue={value} step={step} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+      ) : (
+        <div className="rounded-xl border bg-white p-3">{typeof value === 'number' ? value : String(value)}</div>
+      )}
+    </div>
+  );
+}
+function EditableSelect({ label, value, options, edit, onChange }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      {edit ? (
+        <select defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+          {options.map(o => <option key={o} value={o}>{o}</option>)}
+        </select>
+      ) : (
+        <div className="rounded-xl border bg-white p-3">{value}</div>
+      )}
+    </div>
+  );
+}
+function EditableDate({ label, value, edit, onChange }) {
+  return (
+    <div>
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      {edit ? (
+        <input type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+      ) : (
+        <div className="rounded-xl border bg-white p-3">{new Date(value).toLocaleDateString()}</div>
+      )}
+    </div>
+  );
+}
+function EditableTextArea({ label, value, edit, onChange }) {
+  return (
+    <div className="sm:col-span-2 lg:col-span-3">
+      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      {edit ? (
+        <textarea defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+      ) : (
+        <div className="rounded-xl border bg-white p-3 whitespace-pre-line">{value}</div>
+      )}
+    </div>
+  );
+}
+function Stat({ label, value }) {
+  return (
+    <div>
+      <div className="text-xs uppercase tracking-wide text-gray-600">{label}</div>
+      <div className="text-xl font-semibold">{value}</div>
+    </div>
+  );
+}
+function Th({ children, className }) {
+  return (
+    <th className={`px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide ${className || ''}`}>{children}</th>
+  );
+}
+function Td({ children }) {
+  return (
+    <td className="px-4 py-2 text-sm">{children}</td>
+  );
+}
+function FormRow({ label, children }) {
+  return (
+    <div>
+      <div className="text-[10px] uppercase tracking-wide text-gray-500 mb-1">{label}</div>
+      {children}
+    </div>
+  );
+}
