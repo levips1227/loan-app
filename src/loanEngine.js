@@ -31,6 +31,11 @@ export const addMonths = (date, months) => {
   const d = parseISO(date);
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
 };
+const monthsBetween = (d1, d2) => {
+  const a = parseISO(d1);
+  const b = parseISO(d2);
+  return (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth());
+};
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const periodsPerYear = (freq) => FREQ[freq] || 12;
@@ -173,4 +178,41 @@ export function recalcAllLoans(loans, payments, draws = []) {
   let out = payments;
   for (const loan of loans) out = recalcLoanPayments(loan, out, draws);
   return out;
+}
+
+// Simple payoff date projection using fixed PI, 30/360 interest, starting from a given due date.
+function countScheduledPayments(payments, loanId) {
+  if (!Array.isArray(payments)) return 0;
+  return payments.filter((p) => p.LoanRef === loanId && p.IsScheduledInstallment !== false).length;
+}
+
+export function computePayoffDate(loan, balanceStart, nextDueDate, allPayments = []) {
+  let bal = round2(balanceStart ?? 0);
+  if (bal <= 0) return null;
+  const apr = loan.APR ?? 0;
+  const pi = fixedPIForLoan(loan);
+  const nd = parseISO(nextDueDate || loan.NextPaymentDate || addMonths(parseISO(loan.OriginationDate), 1));
+  const orig = parseISO(loan.OriginationDate);
+  const firstDue = parseISO(loan.NextPaymentDate || addMonths(orig, 1));
+
+  const scheduledPayoff = addMonths(firstDue, Math.max(0, (loan.TermMonths || 0) - 1));
+  const scheduledCountDone = countScheduledPayments(allPayments, loan.id);
+  const nextDueAdjusted = addMonths(firstDue, scheduledCountDone);
+  const remainingScheduled = Math.max(1, (loan.TermMonths || 0) - scheduledCountDone);
+
+  // Compute needed periods from current balance using fixed PI
+  let needed = 0;
+  let balRun = bal;
+  for (let i = 0; i < 2000; i++) {
+    const interest = round2(balRun * apr / 12);
+    const principal = Math.max(0, round2(pi - interest));
+    needed += 1;
+    if (principal <= 0) break;
+    if (round2(principal) >= balRun) break;
+    balRun = round2(balRun - principal);
+  }
+
+  // Keep scheduled payoff if we're effectively on track (within 1 period), otherwise adjust
+  const finalPeriods = Math.abs(needed - remainingScheduled) <= 1 ? remainingScheduled : Math.max(1, needed);
+  return toISODate(addMonths(nextDueAdjusted, finalPeriods - 1));
 }

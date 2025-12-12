@@ -24,6 +24,7 @@ import {
   EPS,
   nearlyEqual,
   recalcLoanPayments as engineRecalc,
+  computePayoffDate,
 } from './loanEngine';
 // Local helper not shared in loanEngine
 const addYears = (date, years) => {
@@ -577,9 +578,13 @@ export default function LoanManagerMock() {
 
   const filteredLoans = loans.filter((l) => !query || l.BorrowerName.toLowerCase().includes(query.toLowerCase()) || l.LoanID.toLowerCase().includes(query.toLowerCase()));
 
-  // Estimate payoff date (forward projection from today with base schedule only)
+  // Estimate payoff date using fixed PI schedule from next due date
+  const payoffDateBase = React.useMemo(() => {
+    if (!selected) return null;
+    const nextDue = selected.NextPaymentDate || toISODate(addMonths(parseISO(selected.OriginationDate), 1));
+    return computePayoffDate(selected, balance, nextDue, payments);
+  }, [selected, balance, payments]);
   const projectionBase = projectToPayoff({ loan: selected, balanceStart: balance, startDate: new Date(), extras: [], draws: draws });
-  const payoffDateBase = projectionBase.payoffDate;
 
   // =============================
   // New Loan Form
