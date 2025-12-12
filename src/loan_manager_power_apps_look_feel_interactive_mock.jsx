@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import {
   LineChart,
   Line,
@@ -9,35 +9,31 @@ import {
   Legend,
   ResponsiveContainer,
 } from 'recharts';
+import {
+  recalcLoanPayments,
+  recalcAllLoans,
+  round2,
+  toISODate,
+  parseISO,
+  daysBetween,
+  addMonths,
+  addDays,
+  amortizedPayment,
+  isAmortizedType,
+  fixedPIForLoan,
+  EPS,
+  nearlyEqual,
+  recalcLoanPayments as engineRecalc,
+} from './loanEngine';
+// Local helper not shared in loanEngine
+const addYears = (date, years) => {
+  const d = parseISO(date);
+  return new Date(Date.UTC(d.getUTCFullYear() + years, d.getUTCMonth(), d.getUTCDate()));
+};
 
 // =============================
 // Utility + Business Logic
 // =============================
-const EPS = 1e-6;
-const round2 = (n) => Math.round((n + Number.EPSILON) * 100) / 100;
-const nearlyEqual = (a, b, eps = EPS) => Math.abs(a - b) <= eps;
-const parseISO = (d) => new Date(d);
-const toISODate = (d) => new Date(d).toISOString().slice(0, 10);
-const daysBetween = (d1, d2) => {
-  const t1 = new Date(toISODate(d1)).getTime();
-  const t2 = new Date(toISODate(d2)).getTime();
-  return Math.max(0, Math.round((t2 - t1) / (1000 * 60 * 60 * 24)));
-};
-const addDays = (date, days) => {
-  const d = new Date(date);
-  d.setDate(d.getDate() + days);
-  return d;
-};
-const addMonths = (date, months) => {
-  const d = new Date(date);
-  d.setMonth(d.getMonth() + months);
-  return d;
-};
-const addYears = (date, years) => {
-  const d = new Date(date);
-  d.setFullYear(d.getFullYear() + years);
-  return d;
-};
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
@@ -56,33 +52,6 @@ function periodsPerYear(freq) { return FREQ[freq] || 12; }
 
 function calcPerDiem(apr, balance) { return (apr ?? 0) / 365 * (balance ?? 0); }
 function calcPayoff(balance, apr, daysSince) { return Math.max(0, round2(balance + calcPerDiem(apr, balance) * Math.max(0, daysSince))); }
-
-// Generic amortized payment by period
-function amortizedPayment(P, apr, nPeriods, ppy) {
-  if (nPeriods <= 0) return 0;
-  // Convert annual rate to periodic rate
-  const r = (apr ?? 0) / ppy;
-  if (Math.abs(r) < EPS) return round2((P ?? 0) / nPeriods);
-  // Standard amortization formula: PMT = P * (r(1+r)^n)/((1+r)^n - 1)
-  const a = (P ?? 0) * (r * Math.pow(1 + r, nPeriods)) / (Math.pow(1 + r, nPeriods) - 1);
-  return round2(Math.max(0, a));
-}
-
-function isAmortizedType(type) {
-  return type === 'Mortgage' || type === 'Car Loan' || type === 'Personal Loan';
-}
-
-// FIXED PI for amortized loans: based on ORIGINAL principal and ORIGINAL term
-function fixedPIForLoan(loan) {
-  const freq = loan.PaymentFrequency || 'Monthly';
-  const ppy = periodsPerYear(freq);
-  // Calculate total number of payments over the loan term
-  const n = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
-  const P = loan.OriginalPrincipal ?? 0;
-  // Calculate fixed payment using amortization formula
-  const payment = amortizedPayment(P, loan.APR, n, ppy);
-  return payment;
-}
 
 // Payment rule by loan type + frequency (principal & interest only; escrow handled separately)
 function principalInterestPaymentFor(balance, apr, remainingMonths, freq, type) {
@@ -108,15 +77,20 @@ function principalInterestPaymentFor(balance, apr, remainingMonths, freq, type) 
 // Full payment incl. escrow for a given loan
 // CHANGE: for amortized types we now compute PI from ORIGINAL principal & term (fixed),
 // falling back to provided `balance` only if OriginalPrincipal is missing (keeps tests valid).
-function scheduledPaymentFor(loan, balance, _remainingMonthsOverride) {
+function scheduledPaymentFor(loan, balance, remainingMonthsOverride) {
   const ppy = periodsPerYear(loan.PaymentFrequency || 'Monthly');
+  const remainingMonths = typeof remainingMonthsOverride === 'number'
+    ? remainingMonthsOverride
+    : loan.TermMonths || 0;
+  const toPeriods = (months) => Math.max(1, Math.round(((months || 0) * ppy) / 12));
+  const amortizedFor = (principal, months = remainingMonths) =>
+    amortizedPayment(principal ?? 0, loan.APR, toPeriods(months), ppy);
   let basePI = 0;
   if (isAmortizedType(loan.LoanType || 'Mortgage')) {
     if (typeof loan.OriginalPrincipal === 'number') {
       basePI = fixedPIForLoan(loan);
     } else {
-      const nPeriods = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
-      basePI = amortizedPayment(balance ?? 0, loan.APR, nPeriods, ppy);
+      basePI = amortizedFor(balance);
     }
   } else if ((loan.LoanType || '') === 'Revolving LOC') {
     basePI = round2((loan.APR ?? 0) / ppy * (balance ?? 0));
@@ -124,66 +98,10 @@ function scheduledPaymentFor(loan, balance, _remainingMonthsOverride) {
     const monthlyMin = Math.max(round2((balance ?? 0) * 0.02), 25);
     basePI = round2((monthlyMin * 12) / ppy);
   } else {
-    const nPeriods = Math.max(1, Math.round(((loan.TermMonths || 0) * ppy) / 12));
-    basePI = amortizedPayment(balance ?? 0, loan.APR, nPeriods, ppy);
+    basePI = amortizedFor(balance);
   }
   const escrowPerPeriod = round2(((loan.EscrowMonthly || 0) * 12) / ppy);
   return round2(basePI + escrowPerPeriod);
-}
-
-// ============ PAYMENT/ DRAW RE-CALC (historical) ============
-// Recalculate principal/interest for a SINGLE loan across all its payments in chronological order, factoring draws
-function recalcLoanPayments(loan, allPayments, allDraws = []) {
-  const pay = allPayments
-    .filter((p) => p.LoanRef === loan.id)
-    .map((p) => ({ ...p, _type: 'payment' }));
-  const draws = allDraws
-    .filter((d) => d.LoanRef === loan.id)
-    .map((d) => ({ ...d, _type: 'draw' }));
-
-  const events = [...pay, ...draws].sort((a, b) => new Date(a.PaymentDate || a.DrawDate) - new Date(b.PaymentDate || b.DrawDate));
-
-  let balance = loan.OriginalPrincipal ?? 0;
-  let lastDate = parseISO(loan.OriginationDate);
-
-  const updatedPayments = [];
-
-  for (const ev of events) {
-    const evDate = parseISO(ev.PaymentDate || ev.DrawDate);
-    const days = daysBetween(lastDate, evDate);
-    const interestAccrued = round2(balance * (loan.APR ?? 0) / 365 * days);
-    balance = round2(balance + interestAccrued); // accrue interest up to event date
-
-    if (ev._type === 'payment') {
-      const payAmt = ev.Amount ?? 0;
-      const interest = Math.min(payAmt, interestAccrued);
-      let principal = round2(payAmt - interest);
-      if (principal < 0) principal = 0;
-      balance = round2(balance - principal);
-
-      updatedPayments.push({
-        ...ev,
-        InterestPortion: round2(interest),
-        PrincipalPortion: round2(principal),
-      });
-    } else if (ev._type === 'draw') {
-      const drawAmt = ev.Amount ?? 0;
-      balance = round2(balance + drawAmt);
-    }
-
-    lastDate = evDate;
-  }
-
-  // Merge back into payments list
-  const updatedIds = new Set(updatedPayments.map((x) => x.id));
-  const merged = allPayments.map((p) => (updatedIds.has(p.id) ? updatedPayments.find((x) => x.id === p.id) : p));
-  return merged;
-}
-
-function recalcAllLoans(loans, payments, draws) {
-  let out = payments;
-  for (const loan of loans) out = recalcLoanPayments(loan, out, draws);
-  return out;
 }
 
 // ============ PROJECTION/ CALCULATOR ============
@@ -246,7 +164,7 @@ function projectToPayoff({ loan, balanceStart, startDate, extras = [], draws = [
     if (dd > startDate) events.push({ type: 'draw', date: dd, amount: round2(d.Amount || 0) });
   }
 
-  // Extras rules → materialize into dated events
+  // Extras rules â†’ materialize into dated events
   for (const r of extras) {
     if (!r || !(r.amount > 0)) continue;
     if (r.kind === 'once') {
@@ -289,7 +207,7 @@ function projectToPayoff({ loan, balanceStart, startDate, extras = [], draws = [
       bal = round2(bal + (ev.amount || 0));
     } else {
       // Calculate total payment amount including any same-day events
-      let payAmt = 0;
+
       let sameDayEvents = [ev];
       while (i + 1 < events.length && toISODate(events[i + 1].date) === toISODate(ev.date) && events[i + 1].type !== 'draw') {
         i++;
@@ -511,7 +429,7 @@ function runSelfTests() {
     // Recalc tests (one simple loan, two payments, daily interest)
     const loan = { id: 1, OriginalPrincipal: 1000, APR: 0.10, OriginationDate: '2024-01-01', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 12 };
     const pmts = [
-      { id: 1, LoanRef: 1, PaymentDate: '2024-01-11', Amount: 100 }, // 10 days interest @10% on 1000 ≈ 2.74
+      { id: 1, LoanRef: 1, PaymentDate: '2024-01-11', Amount: 100 }, // 10 days interest @10% on 1000 â‰ˆ 2.74
       { id: 2, LoanRef: 1, PaymentDate: '2024-01-21', Amount: 100 }, // next 10 days on new balance
     ];
     const res = recalcLoanPayments(loan, pmts, []);
@@ -538,7 +456,7 @@ function runSelfTests() {
 
     // Frequency scaling (weekly)
     const loanW = { APR: 0, TermMonths: 12, PaymentFrequency: 'Weekly', LoanType: 'Mortgage', EscrowMonthly: 520 };
-    const schedW = scheduledPaymentFor(loanW, 12000, 12); // PI=12000/52≈230.77, escrow per week=6240/52=120 => ~350.77
+    const schedW = scheduledPaymentFor(loanW, 12000, 12); // PI=12000/52â‰ˆ230.77, escrow per week=6240/52=120 => ~350.77
     console.assert(nearlyEqual(schedW, round2(12000/52 + (520*12/52))), 'Scheduled weekly with escrow scaling');
 
     // Credit card minimum (weekly scaling from $25 monthly)
@@ -575,7 +493,7 @@ if (typeof window !== 'undefined') runSelfTests();
 // UI Component
 // =============================
 export default function LoanManagerMock() {
-  const fmt = (d) => new Date(d).toLocaleDateString();
+  const fmt = (d) => toISODate(d);
   const money = (n) => (n ?? 0).toLocaleString(undefined, { style: 'currency', currency: 'USD' });
 
   // --- Admin defaults (editable & savable) ---
@@ -615,12 +533,13 @@ export default function LoanManagerMock() {
     { id: 1, LoanID: 'LN-0001', BorrowerName: 'Test Borrower', LoanType: 'Mortgage', OriginalPrincipal: 100000, OriginationDate: '2024-01-15', TermMonths: 360, APR: 0.065, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-02-15', EscrowMonthly: 300, LateFeeFlat: 0, LateFeePct: 0.04, GraceDays: 5, Status: 'Active', Notes: 'Sample row (delete later)' },
     { id: 2, LoanID: 'LN-0020', BorrowerName: 'James Garcia', LoanType: 'Mortgage', OriginalPrincipal: 250000, OriginationDate: '2023-06-01', TermMonths: 180, APR: 0.059, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-15', EscrowMonthly: 450, LateFeeFlat: 25, LateFeePct: 0.03, GraceDays: 7, Status: 'Active', Notes: 'Conventional' },
     { id: 3, LoanID: 'LN-0042', BorrowerName: 'Avery Chen', LoanType: 'Revolving LOC', OriginalPrincipal: 150000, OriginationDate: '2022-11-10', TermMonths: 120, APR: 0.072, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-20', EscrowMonthly: 0, LateFeeFlat: 35, LateFeePct: 0.02, GraceDays: 5, Status: 'Active', Notes: 'Open draw period' },
+    { id: 4, LoanID: 'LN-0100', BorrowerName: 'LS', LoanType: 'Mortgage', OriginalPrincipal: 332000, OriginationDate: '2025-09-03', TermMonths: 360, APR: 0.065, PaymentFrequency: 'Monthly', NextPaymentDate: '2025-10-03', EscrowMonthly: 0, LateFeeFlat: 0, LateFeePct: 0.04, GraceDays: 15, Status: 'Active', Notes: 'Fixed payment', FixedPayment: true },
   ];
 
   const initialPayments = [
-    { id: 101, LoanRef: 1, PaymentID: 'PMT-0001', PaymentDate: '2024-02-15', Amount: 700, PrincipalPortion: 200, InterestPortion: 400, EscrowPortion: 100, Method: 'ACH', Reference: 'Sample', PostedBy: 'You', PostedAt: '2024-02-15T10:00:00' },
-    { id: 102, LoanRef: 1, PaymentID: 'PMT-0002', PaymentDate: '2024-03-15', Amount: 700, PrincipalPortion: 210, InterestPortion: 390, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'You', PostedAt: '2024-03-15T10:00:00' },
-    { id: 201, LoanRef: 2, PaymentID: 'PMT-1001', PaymentDate: '2024-08-15', Amount: 2100, PrincipalPortion: 900, InterestPortion: 1100, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'Ops', PostedAt: '2024-08-15T10:00:00' },
+    { id: 101, LoanRef: 1, PaymentID: 'PMT-0001', PaymentDate: '2024-02-15', Amount: 700, PrincipalPortion: 200, InterestPortion: 400, EscrowPortion: 100, Method: 'ACH', Reference: 'Sample', PostedBy: 'You', PostedAt: '2024-02-15T10:00:00', IsScheduledInstallment: true },
+    { id: 102, LoanRef: 1, PaymentID: 'PMT-0002', PaymentDate: '2024-03-15', Amount: 700, PrincipalPortion: 210, InterestPortion: 390, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'You', PostedAt: '2024-03-15T10:00:00', IsScheduledInstallment: true },
+    { id: 201, LoanRef: 2, PaymentID: 'PMT-1001', PaymentDate: '2024-08-15', Amount: 2100, PrincipalPortion: 900, InterestPortion: 1100, EscrowPortion: 100, Method: 'ACH', Reference: '', PostedBy: 'Ops', PostedAt: '2024-08-15T10:00:00', IsScheduledInstallment: true },
   ];
 
   const [loans, setLoans] = React.useState(initialLoans);
@@ -641,7 +560,7 @@ export default function LoanManagerMock() {
   const selected = loans.find((l) => l.id === selectedId);
   const loanPaymentsDesc = payments
     .filter((p) => p.LoanRef === selectedId)
-    .sort((a, b) => new Date(b.PaymentDate) - new Date(a.PaymentDate));
+    .sort((a, b) => parseISO(b.PaymentDate) - parseISO(a.PaymentDate));
   const loanPaymentsAsc = [...loanPaymentsDesc].reverse();
 
   const principalPaid = loanPaymentsDesc.reduce((s, p) => s + (p.PrincipalPortion ?? 0), 0);
@@ -792,18 +711,19 @@ export default function LoanManagerMock() {
   // =============================
   const [pDate, setPDate] = React.useState(toISODate(new Date()));
   const [pAmt, setPAmt] = React.useState('');
-  const [pScheduled, setPScheduled] = React.useState(scheduledCurrent);
+  const [pScheduled, setPScheduled] = React.useState(true);
   const [pExtra, setPExtra] = React.useState('');
   const [pMethod, setPMethod] = React.useState('ACH');
   const [pRef, setPRef] = React.useState('');
 
   // Prefill when switching loans or changing schedule
   React.useEffect(() => {
+    if (!selected) return;
     const sched = scheduledPaymentFor(selected, balance);
-    setPScheduled(sched);
+    setPScheduled(true);
     setPAmt(String(sched || ''));
     setPExtra('');
-  }, [selectedId, selected.APR, selected.TermMonths, selected.PaymentFrequency, selected.LoanType, selected.EscrowMonthly, balance]);
+  }, [selected, balance]);
 
   function handleAmountChange(v) {
     setPAmt(v);
@@ -833,6 +753,7 @@ export default function LoanManagerMock() {
       PrincipalPortion: 0,
       InterestPortion: 0,
       EscrowPortion: 0,
+      IsScheduledInstallment: pScheduled,
       Method: pMethod,
       Reference: pRef,
       PostedBy: 'You',
@@ -842,8 +763,9 @@ export default function LoanManagerMock() {
       const withNew = [newRow, ...prev];
       return recalcLoanPayments(selected, withNew, draws);
     });
-    setPAmt(String(pScheduled || ''));
+    setPAmt(String(scheduledCurrent || ''));
     setPExtra('');
+    setPScheduled(true);
     setPRef('');
   }
 
@@ -1163,7 +1085,7 @@ export default function LoanManagerMock() {
                     <Stat label="Principal Paid" value={money(principalPaid)} />
                     <Stat label="Interest Paid" value={money(interestPaid)} />
                     <Stat label="Total Payments" value={money(totalPayments)} />
-                    <Stat label="Projected Payoff Date" value={payoffDateBase ? fmt(payoffDateBase) : '—'} />
+                    <Stat label="Projected Payoff Date" value={payoffDateBase ? fmt(payoffDateBase) : 'â€”'} />
                   </div>
                 </div>
               </div>
@@ -1205,8 +1127,8 @@ export default function LoanManagerMock() {
                               money(p.Amount)
                             )}
                           </Td>
-                          <Td>{p.PrincipalPortion == null ? '—' : money(p.PrincipalPortion)}</Td>
-                          <Td>{p.InterestPortion == null ? '—' : money(p.InterestPortion)}</Td>
+                          <Td>{p.PrincipalPortion == null ? 'â€”' : money(p.PrincipalPortion)}</Td>
+                          <Td>{p.InterestPortion == null ? 'â€”' : money(p.InterestPortion)}</Td>
                           <Td>{money(p.EscrowPortion)}</Td>
                           <Td>
                             {editId === p.id ? (
@@ -1256,15 +1178,21 @@ export default function LoanManagerMock() {
                     <input type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
                     <div className="text-[11px] text-gray-500 mt-1">Prefilled with {selected.PaymentFrequency || 'Monthly'}: {money(pScheduled || 0)}</div>
                   </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
-                    <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
-                  </div>
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">Method</label>
-                    <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
-                      {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
-                    </select>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
+                  <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                </div>
+                <div className="md:col-span-2 flex items-start gap-2 pt-5">
+                  <input id="scheduledFlag" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
+                  <label htmlFor="scheduledFlag" className="text-sm text-gray-700">
+                    Apply as scheduled monthly payment (early regular payment). Uncheck to post as unscheduled principal-only curtailment.
+                  </label>
+                </div>
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Method</label>
+                  <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                    {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
+                  </select>
                   </div>
                   <div className="md:col-span-2">
                     <label className="block text-xs text-gray-600 mb-1">Reference</label>
@@ -1298,9 +1226,9 @@ export default function LoanManagerMock() {
                           <div className="text-gray-500">No draws yet.</div>
                         ) : (
                           <ul className="divide-y">
-                            {draws.filter(d=>d.LoanRef===selected.id).sort((a,b)=>new Date(a.DrawDate)-new Date(b.DrawDate)).map(d => (
+                            {draws.filter(d=>d.LoanRef===selected.id).sort((a,b)=>parseISO(a.DrawDate)-parseISO(b.DrawDate)).map(d => (
                               <li key={d.id} className="py-2 flex items-center justify-between">
-                                <div>{fmt(d.DrawDate)} — {money(d.Amount)}</div>
+                                <div>{fmt(d.DrawDate)} â€” {money(d.Amount)}</div>
                                 <button onClick={()=>deleteDraw(d.id)} className="text-xs rounded-md border px-3 py-1">Remove</button>
                               </li>
                             ))}
@@ -1373,15 +1301,15 @@ export default function LoanManagerMock() {
                   {/* Right: results */}
                   <div>
                     <div className="font-medium mb-2">Modeled Results</div>
-                    <div className=\"rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 gap-6\">
-                      <Stat label=\"Projected Payoff (with extras)\" value={calcProjection?.payoffDate ? fmt(calcProjection.payoffDate) : '-'} />
-                      <Stat label=\"Base Payoff (no extras)\" value={payoffDateBase ? fmt(payoffDateBase) : '-'} />
-                      <Stat label=\"Time Saved vs Base\" value={timeSavedLabel} />
-                      <Stat label=\"Future Interest (with extras)\" value={futureInterestLabel} />
-                      <Stat label=\"Future Principal (with extras)\" value={futurePrincipalLabel} />
-                      <Stat label=\"Interest Saved vs Base\" value={interestSavedLabel} />
-                      <Stat label=\"Lifetime Total Paid (with extras)\" value={lifetimePaidLabel} />
-                      <Stat label=\"Lifetime Savings vs Base\" value={lifetimeSavingsLabel} />
+                    <div className="rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 gap-6">
+                      <Stat label="Projected Payoff (with extras)" value={calcProjection?.payoffDate ? fmt(calcProjection.payoffDate) : '-'} />
+                      <Stat label="Base Payoff (no extras)" value={payoffDateBase ? fmt(payoffDateBase) : '-'} />
+                      <Stat label="Time Saved vs Base" value={timeSavedLabel} />
+                      <Stat label="Future Interest (with extras)" value={futureInterestLabel} />
+                      <Stat label="Future Principal (with extras)" value={futurePrincipalLabel} />
+                      <Stat label="Interest Saved vs Base" value={interestSavedLabel} />
+                      <Stat label="Lifetime Total Paid (with extras)" value={lifetimePaidLabel} />
+                      <Stat label="Lifetime Savings vs Base" value={lifetimeSavingsLabel} />
                     </div>
                     {/* Line chart */}
                     <div className="mt-4 h-64">
@@ -1510,7 +1438,7 @@ function EditableDate({ label, value, edit, onChange }) {
       {edit ? (
         <input type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
       ) : (
-        <div className="rounded-xl border bg-white p-3">{new Date(value).toLocaleDateString()}</div>
+        <div className="rounded-xl border bg-white p-3">{toISODate(value)}</div>
       )}
     </div>
   );
