@@ -25,6 +25,7 @@ import {
   nearlyEqual,
   recalcLoanPayments as engineRecalc,
   computePayoffDate,
+  projectWithExtras,
 } from './loanEngine';
 // Local helper not shared in loanEngine
 const addYears = (date, years) => {
@@ -38,6 +39,27 @@ const addYears = (date, years) => {
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
+const STORAGE_KEY = 'loan-manager-state-v1';
+
+function loadPersistedState() {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch (e) {
+    console.warn('Failed to load persisted state', e);
+    return null;
+  }
+}
+function persistState(data) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  } catch (e) {
+    console.warn('Failed to persist state', e);
+  }
+}
 
 function nextByFreq(dt, freq) {
   switch (freq) {
@@ -546,6 +568,7 @@ export default function LoanManagerMock() {
   const [loans, setLoans] = React.useState(initialLoans);
   const [payments, setPayments] = React.useState(initialPayments);
   const [draws, setDraws] = React.useState([]); // {id, LoanRef, DrawDate, Amount}
+  const hydrated = React.useRef(false);
 
   const [query, setQuery] = React.useState('');
   const [selectedId, setSelectedId] = React.useState(loans[0].id);
@@ -554,9 +577,25 @@ export default function LoanManagerMock() {
 
   // Recalc all on mount to normalize any sample rows
   React.useEffect(() => {
-    setPayments((prev) => recalcAllLoans(loans, prev, draws));
+    const saved = loadPersistedState();
+    if (saved && !hydrated.current) {
+      setLoans(saved.loans || initialLoans);
+      setPayments(saved.payments || initialPayments);
+      setDraws(saved.draws || []);
+      if (saved.selectedId) setSelectedId(saved.selectedId);
+      hydrated.current = true;
+    } else {
+      // initial normalize
+      setPayments((prev) => recalcAllLoans(loans, prev, draws));
+      hydrated.current = true;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  React.useEffect(() => {
+    if (!hydrated.current) return;
+    persistState({ loans, payments, draws, selectedId });
+  }, [loans, payments, draws, selectedId]);
 
   const selected = loans.find((l) => l.id === selectedId);
   const loanPaymentsDesc = payments
@@ -579,12 +618,15 @@ export default function LoanManagerMock() {
   const filteredLoans = loans.filter((l) => !query || l.BorrowerName.toLowerCase().includes(query.toLowerCase()) || l.LoanID.toLowerCase().includes(query.toLowerCase()));
 
   // Estimate payoff date using fixed PI schedule from next due date
+  const nextDue = selected?.NextPaymentDate || toISODate(addMonths(parseISO(selected?.OriginationDate), 1));
   const payoffDateBase = React.useMemo(() => {
     if (!selected) return null;
-    const nextDue = selected.NextPaymentDate || toISODate(addMonths(parseISO(selected.OriginationDate), 1));
     return computePayoffDate(selected, balance, nextDue, payments);
-  }, [selected, balance, payments]);
-  const projectionBase = projectToPayoff({ loan: selected, balanceStart: balance, startDate: new Date(), extras: [], draws: draws });
+  }, [selected, balance, payments, nextDue]);
+  const scheduledDone = payments.filter((p)=>p.LoanRef===selected?.id && p.IsScheduledInstallment!==false).length;
+  const projectionBase = React.useMemo(() => {
+    return projectWithExtras({ loan: selected, balanceStart: balance, nextDueDate: nextDue, extras: [], scheduledDone });
+  }, [selected, balance, nextDue, scheduledDone]);
 
   // =============================
   // New Loan Form
@@ -832,25 +874,45 @@ export default function LoanManagerMock() {
   // =============================
   // Calculator (what-if extras)
   // =============================
-  const [calcExtras, setCalcExtras] = React.useState([
-    // { id, kind: 'recurring', amount, every: 'month'|'week'|'day'|'year', start },
-    // { id, kind: 'once', amount, date }
-  ]);
+  const [calcExtrasDraft, setCalcExtrasDraft] = React.useState([]);
+  const [calcExtras, setCalcExtras] = React.useState([]);
   const [calcAggMode, setCalcAggMode] = React.useState('monthly'); // 'monthly' | 'yearly'
+  const [openYears, setOpenYears] = React.useState(new Set());
 
   function addCalcExtra(kind = 'recurring') {
-    const id = Math.max(0, ...calcExtras.map((x) => x.id || 0)) + 1;
-    if (kind === 'recurring') setCalcExtras((p) => [...p, { id, kind: 'recurring', amount: 0, every: 'month', start: toISODate(new Date()) }]);
-    else setCalcExtras((p) => [...p, { id, kind: 'once', amount: 0, date: toISODate(new Date()) }]);
+    const id = Math.max(0, ...calcExtrasDraft.map((x) => x.id || 0)) + 1;
+    if (kind === 'recurring') setCalcExtrasDraft((p) => [...p, { id, kind: 'recurring', amount: 0, every: 'month', start: toISODate(new Date()) }]);
+    else setCalcExtrasDraft((p) => [...p, { id, kind: 'once', amount: 0, date: toISODate(new Date()) }]);
   }
-  function updateCalcExtra(id, patch) { setCalcExtras((p) => p.map((x) => x.id === id ? { ...x, ...patch } : x)); }
-  function removeCalcExtra(id) { setCalcExtras((p) => p.filter((x) => x.id !== id)); }
+  function updateCalcExtra(id, patch) { setCalcExtrasDraft((p) => p.map((x) => x.id === id ? { ...x, ...patch } : x)); }
+  function removeCalcExtra(id) { setCalcExtrasDraft((p) => p.filter((x) => x.id !== id)); }
+  function applyCalcExtras() {
+    const filtered = calcExtrasDraft.filter((x) => x && Number(x.amount) > 0);
+    setCalcExtras(filtered);
+  }
 
   // Standard amortization schedule without extras (baseline)
-  const standardAmort = React.useMemo(() => computeStandardAmortization(selected, balance, new Date()), [selected, balance]);
+  const standardAmort = React.useMemo(() => projectionBase, [projectionBase]);
 
   // Projection for calculator view (includes extras)
-  const calcProjection = React.useMemo(() => projectToPayoff({ loan: selected, balanceStart: balance, startDate: new Date(), extras: calcExtras, draws }), [selected, balance, calcExtras, draws]);
+  const calcProjection = React.useMemo(() => {
+    const extrasClean = (calcExtras || []).filter((x) => Number(x.amount) > 0);
+    if (!extrasClean.length) return projectionBase;
+    return projectWithExtras({ loan: selected, balanceStart: balance, nextDueDate: nextDue, extras: extrasClean, scheduledDone });
+  }, [selected, balance, calcExtras, projectionBase, nextDue, scheduledDone]);
+
+  // Amortization display: full schedule starting at first due, with applied extras
+  const amortDisplayProjection = React.useMemo(() => {
+    const extrasClean = (calcExtras || []).filter((x) => Number(x.amount) > 0);
+    const firstDueOrig = selected?.NextPaymentDate || toISODate(addMonths(parseISO(selected?.OriginationDate), 1));
+    return projectWithExtras({
+      loan: selected,
+      balanceStart: selected?.OriginalPrincipal,
+      nextDueDate: firstDueOrig,
+      extras: extrasClean,
+      scheduledDone: 0,
+    });
+  }, [selected, calcExtras]);
 
   const calcTimeline = React.useMemo(() => {
     const timeline = calcProjection?.timeline;
@@ -873,26 +935,54 @@ export default function LoanManagerMock() {
     }));
   }, [calcProjection, standardAmort]);
 
-  const calcAgg = React.useMemo(() => aggregateTimeline(calcTimeline, calcAggMode), [calcTimeline, calcAggMode]);
+  const calcAgg = React.useMemo(() => aggregateTimeline(calcProjection?.timeline || [], calcAggMode), [calcProjection, calcAggMode]);
+  const amortYearGroups = React.useMemo(() => {
+    const tl = amortDisplayProjection?.timeline || calcProjection?.timeline || [];
+    const byYear = new Map();
+    for (const row of tl) {
+      const y = row.date?.slice(0, 4);
+      if (!y) continue;
+      if (!byYear.has(y)) byYear.set(y, { year: y, principal: 0, interest: 0, balance: row.balance, months: [] });
+      const g = byYear.get(y);
+      g.principal = round2(g.principal + (row.principal ?? row.principalPaid ?? 0));
+      g.interest = round2(g.interest + (row.interest ?? row.interestPaid ?? 0));
+      g.balance = row.balance;
+      g.months.push(row);
+    }
+    return Array.from(byYear.values()).sort((a, b) => a.year.localeCompare(b.year));
+  }, [calcProjection]);
+  React.useEffect(() => {
+    if (openYears.size === 0 && amortYearGroups.length) {
+      const first = amortYearGroups[0].year;
+      setOpenYears(new Set([first]));
+    }
+  }, [amortYearGroups, openYears.size]);
 
   const projectionTotals = calcProjection?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
   const baseTotals = projectionBase?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
   const lifetimePaidWithExtras = round2(totalPayments + projectionTotals.totalPaid);
-  const lifetimePaidBase = round2(totalPayments + baseTotals.totalPaid);
-  const lifetimeSavings = round2(lifetimePaidBase - lifetimePaidWithExtras);
-  const interestSaved = round2(baseTotals.totalInterest - projectionTotals.totalInterest);
+  const lifetimePaidCurrent = round2(totalPayments + baseTotals.totalPaid);
+  const projectionOriginal = React.useMemo(() => {
+    const firstDueOrig = selected?.NextPaymentDate || toISODate(addMonths(parseISO(selected?.OriginationDate), 1));
+    return projectWithExtras({ loan: { ...selected, OriginalPrincipal: selected?.OriginalPrincipal }, balanceStart: selected?.OriginalPrincipal, nextDueDate: firstDueOrig, extras: [], payments: [] });
+  }, [selected]);
+  const originalTotals = projectionOriginal?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
+  const lifetimeSavingsVsCurrent = round2(lifetimePaidCurrent - lifetimePaidWithExtras);
+  const lifetimeSavingsVsOriginal = round2((originalTotals.totalPaid ?? 0) - projectionTotals.totalPaid);
+  const interestSavedVsCurrent = round2(baseTotals.totalInterest - projectionTotals.totalInterest);
+  const interestSavedVsOriginal = round2((originalTotals.totalInterest ?? 0) - projectionTotals.totalInterest);
   const timeSavedDays = payoffDateBase && calcProjection?.payoffDate ? daysBetween(calcProjection.payoffDate, payoffDateBase) : 0;
   const timeSavedLabel = timeSavedDays > 0 ? formatDuration(timeSavedDays) : 'N/A';
   const futureInterestLabel = money(projectionTotals.totalInterest);
   const futurePrincipalLabel = money(projectionTotals.totalPrincipal);
   const lifetimePaidLabel = money(lifetimePaidWithExtras);
-  const interestSavedLabel = Math.abs(interestSaved) > EPS ? money(interestSaved) : 'N/A';
-  const lifetimeSavingsLabel = Math.abs(lifetimeSavings) > EPS ? money(lifetimeSavings) : 'N/A';
+  const interestSavedLabel = Math.abs(interestSavedVsCurrent) > EPS ? money(interestSavedVsCurrent) : 'N/A';
+  const lifetimeSavingsLabel = Math.abs(lifetimeSavingsVsOriginal) > EPS ? money(lifetimeSavingsVsOriginal) : 'N/A';
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-600">
+    <div className="min-h-screen bg-gray-50 text-gray-600 w-full">
       {/* Header */}
       <div className="sticky top-0 z-10 border-b bg-white/80 backdrop-blur">
-        <div className="mx-auto max-w-7xl px-4 py-3 flex items-center gap-3">
+        <div className="mx-auto w-full px-4 py-3 flex items-center gap-3">
           <div className="shrink-0 rounded-xl bg-violet-600 px-3 py-1 text-white font-semibold">Loan Manager</div>
 
           {/* Header buttons */}
@@ -939,7 +1029,7 @@ export default function LoanManagerMock() {
       )}
 
       {/* Main layout */}
-      <div className="mx-auto max-w-7xl px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <div className="mx-auto w-full px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Loans list + New Loan */}
         <div className="lg:col-span-1 space-y-6">
           {/* New Loan Card */}
@@ -1256,50 +1346,59 @@ export default function LoanManagerMock() {
                 <div className="p-4 grid md:grid-cols-2 gap-6">
                   {/* Left: extras config */}
                   <div>
-                    <div className="font-medium mb-2">Extra Payments</div>
-                    {calcExtras.length === 0 && <div className="text-sm text-gray-500 mb-2">No extras yet.</div>}
-                    <div className="space-y-2">
-                      {calcExtras.map((x) => (
-                        <div key={x.id} className="rounded-xl border p-3 grid sm:grid-cols-6 gap-2 items-end">
-                          <div className="sm:col-span-2">
-                            <label className="block text-xs text-gray-600 mb-1">Type</label>
-                            <select value={x.kind} onChange={(e)=>updateCalcExtra(x.id,{kind:e.target.value})} className="w-full rounded-xl border px-3 py-2">
-                              <option value="recurring">Recurring</option>
-                              <option value="once">One-time</option>
-                            </select>
-                          </div>
-                          <div>
-                            <label className="block text-xs text-gray-600 mb-1">Amount</label>
-                            <input type="number" min="0" step="0.01" value={x.amount} onChange={(e)=>updateCalcExtra(x.id,{amount:Number(e.target.value)})} className="w-full rounded-xl border px-3 py-2" />
-                          </div>
-                          {x.kind === 'recurring' ? (
-                            <>
-                              <div>
-                                <label className="block text-xs text-gray-600 mb-1">Every</label>
-                                <select value={x.every} onChange={(e)=>updateCalcExtra(x.id,{every:e.target.value})} className="w-full rounded-xl border px-3 py-2">
-                                  {['day','week','month','year'].map(o=> <option key={o} value={o}>{o}</option>)}
-                                </select>
-                              </div>
-                              <div className="sm:col-span-2">
-                                <label className="block text-xs text-gray-600 mb-1">Start</label>
-                                <input type="date" value={x.start} onChange={(e)=>updateCalcExtra(x.id,{start:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
-                              </div>
-                            </>
-                          ) : (
+                  <div className="font-medium mb-2">Extra Payments</div>
+                  {calcExtrasDraft.length === 0 && <div className="text-sm text-gray-500 mb-2">No extras yet.</div>}
+                  <div className="space-y-2">
+                    {calcExtrasDraft.map((x) => (
+                      <div key={x.id} className="rounded-xl border p-3 grid sm:grid-cols-8 gap-3 items-end">
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs text-gray-600 mb-1">Type</label>
+                          <select value={x.kind} onChange={(e)=>updateCalcExtra(x.id,{kind:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                            <option value="recurring">Recurring</option>
+                            <option value="once">One-time</option>
+                          </select>
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={x.amount}
+                            onChange={(e)=>updateCalcExtra(x.id,{amount:Number(e.target.value)})}
+                            onFocus={(e)=>e.target.select()}
+                            className="w-full rounded-xl border px-3 py-2"
+                          />
+                        </div>
+                        {x.kind === 'recurring' ? (
+                          <>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs text-gray-600 mb-1">Every</label>
+                              <select value={x.every} onChange={(e)=>updateCalcExtra(x.id,{every:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                                {['day','week','month','year'].map(o=> <option key={o} value={o}>{o}</option>)}
+                              </select>
+                            </div>
+                            <div className="sm:col-span-2">
+                              <label className="block text-xs text-gray-600 mb-1">Start</label>
+                              <input type="date" value={x.start} onChange={(e)=>updateCalcExtra(x.id,{start:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                            </div>
+                          </>
+                        ) : (
                             <div className="sm:col-span-3">
                               <label className="block text-xs text-gray-600 mb-1">Date</label>
                               <input type="date" value={x.date} onChange={(e)=>updateCalcExtra(x.id,{date:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                             </div>
                           )}
-                          <div className="sm:col-span-1 flex justify-end">
-                            <button onClick={()=>removeCalcExtra(x.id)} className="rounded-md border px-3 py-2 text-xs">Remove</button>
-                          </div>
+                        <div className="sm:col-span-2 flex justify-end items-center gap-2">
+                          <button onClick={()=>removeCalcExtra(x.id)} className="rounded-md border px-3 py-2 text-xs">Remove</button>
                         </div>
-                      ))}
-                    </div>
-                    <div className="mt-3 flex gap-2">
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2">
                       <button onClick={()=>addCalcExtra('recurring')} className="rounded-xl border px-4 py-2 text-sm">+ Add Recurring</button>
                       <button onClick={()=>addCalcExtra('once')} className="rounded-xl border px-4 py-2 text-sm">+ Add One-time</button>
+                      <button onClick={applyCalcExtras} className="rounded-xl bg-violet-600 text-white px-4 py-2 text-sm">Apply Extras</button>
                     </div>
                   </div>
 
@@ -1320,7 +1419,7 @@ export default function LoanManagerMock() {
                     <div className="mt-4 h-64">
                       <ResponsiveContainer width="100%" height="100%">
                 {/* Use standard amortization schedule for chart to keep it simple and predictable */}
-                <LineChart data={standardAmort.schedule} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
+                <LineChart data={calcProjection?.timeline || []} margin={{ top: 5, right: 20, left: 0, bottom: 5 }}>
                           <CartesianGrid strokeDasharray="3 3" />
                           <XAxis dataKey="date" hide={false} tick={{ fontSize: 10 }} />
                           <YAxis tick={{ fontSize: 10 }} />
@@ -1338,35 +1437,48 @@ export default function LoanManagerMock() {
                 {/* Amortization aggregate */}
                 <div className="px-4 pb-4">
                   <div className="flex items-center justify-between py-2">
-                    <div className="font-medium">Amortization ({calcAggMode})</div>
-                    <div className="flex gap-2 text-sm">
-                      <button onClick={()=>setCalcAggMode('monthly')} className={`rounded-full px-3 py-1 border ${calcAggMode==='monthly'?'bg-violet-600 text-white':'bg-white'}`}>Monthly</button>
-                      <button onClick={()=>setCalcAggMode('yearly')} className={`rounded-full px-3 py-1 border ${calcAggMode==='yearly'?'bg-violet-600 text-white':'bg-white'}`}>Yearly</button>
-                    </div>
+                    <div className="font-medium">Amortization (by year)</div>
                   </div>
-                  <div className="overflow-auto">
-                    <table className="min-w-full text-sm">
-                      <thead className="bg-gray-50 text-gray-600">
-                        <tr>
-                          <Th>Period</Th>
-                          <Th>Total Paid</Th>
-                          <Th>Interest</Th>
-                          <Th>Principal</Th>
-                          <Th>Ending Balance</Th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y">
-                        {calcAgg.map((row) => (
-                          <tr key={row.period} className="hover:bg-gray-50">
-                            <Td>{row.period}</Td>
-                            <Td>{money(row.paid)}</Td>
-                            <Td>{money(row.interest)}</Td>
-                            <Td>{money(row.principal)}</Td>
-                            <Td>{money(row.balance)}</Td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="border rounded-xl divide-y">
+                    {amortYearGroups.map((year) => {
+                      const open = openYears.has(year.year);
+                      return (
+                        <div key={year.year}>
+                          <button
+                            onClick={() => {
+                              const next = new Set(openYears);
+                              if (next.has(year.year)) next.delete(year.year); else next.add(year.year);
+                              setOpenYears(next);
+                            }}
+                            className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-lg">{open ? '–' : '+'}</span>
+                              <span className="font-semibold">{year.year}</span>
+                            </div>
+                            <div className="flex gap-6 text-sm text-gray-700">
+                              <span>Principal: {money(year.principal)}</span>
+                              <span>Interest: {money(year.interest)}</span>
+                              <span>Ending Balance: {money(year.balance)}</span>
+                            </div>
+                          </button>
+                          {open && (
+                            <div className="divide-y">
+                              {year.months.map((m) => (
+                                <div key={m.date} className="flex items-center justify-between px-6 py-2 text-sm hover:bg-gray-50">
+                                  <div className="w-32">{new Date(m.date).toLocaleString(undefined, { month: 'short', year: 'numeric' })}</div>
+                                  <div className="flex gap-6">
+                                    <span>Principal: {money(m.principal)}</span>
+                                    <span>Interest: {money(m.interest)}</span>
+                                    <span>Balance: {money(m.balance)}</span>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               </div>

@@ -31,11 +31,16 @@ export const addMonths = (date, months) => {
   const d = parseISO(date);
   return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
 };
+export const addYears = (date, years) => {
+  const d = parseISO(date);
+  return new Date(Date.UTC(d.getUTCFullYear() + years, d.getUTCMonth(), d.getUTCDate()));
+};
 const monthsBetween = (d1, d2) => {
   const a = parseISO(d1);
   const b = parseISO(d2);
   return (b.getUTCFullYear() - a.getUTCFullYear()) * 12 + (b.getUTCMonth() - a.getUTCMonth());
 };
+const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const periodsPerYear = (freq) => FREQ[freq] || 12;
@@ -186,6 +191,47 @@ function countScheduledPayments(payments, loanId) {
   return payments.filter((p) => p.LoanRef === loanId && p.IsScheduledInstallment !== false).length;
 }
 
+function expandExtrasMap(extras, startDate, maxYears = 100) {
+  const map = new Map();
+  if (!Array.isArray(extras)) return map;
+  const end = addYears(startDate, maxYears);
+  for (const r of extras) {
+    if (!r || !(r.amount > 0)) continue;
+    if (r.kind === 'once') {
+      const parsed = parseISO(r.date || startDate);
+      if (Number.isNaN(parsed.getTime())) continue;
+      const monthsOff = Math.max(0, monthsBetween(startDate, parsed));
+      const aligned = addMonths(startDate, monthsOff); // snap once payments to the scheduled due for that month
+      const key = toISODate(aligned);
+      if (aligned >= startDate && aligned <= end) {
+        map.set(key, round2((map.get(key) || 0) + round2(r.amount)));
+      }
+    } else {
+      const every = r.every || 'month';
+      let when = parseISO(r.start || startDate);
+      if (Number.isNaN(when.getTime())) when = startDate;
+      if (when < startDate) when = startDate;
+
+      // Align monthly/yearly recurrences to the scheduled due day (same day as startDate)
+      if (every === 'month' || every === 'year') {
+        const monthsOff = Math.max(0, monthsBetween(startDate, when));
+        when = addMonths(startDate, monthsOff);
+      }
+
+      for (let i = 0; i < (EXTRA_FREQ[every] || 12) * maxYears; i++) {
+        if (when > end) break;
+        const key = toISODate(when);
+        map.set(key, round2((map.get(key) || 0) + round2(r.amount)));
+        if (every === 'day') when = addDays(when, 1);
+        else if (every === 'week') when = addDays(when, 7);
+        else if (every === 'month') when = addMonths(when, 1);
+        else if (every === 'year') when = addYears(when, 1);
+      }
+    }
+  }
+  return map;
+}
+
 export function computePayoffDate(loan, balanceStart, nextDueDate, allPayments = []) {
   let bal = round2(balanceStart ?? 0);
   if (bal <= 0) return null;
@@ -215,4 +261,63 @@ export function computePayoffDate(loan, balanceStart, nextDueDate, allPayments =
   // Keep scheduled payoff if we're effectively on track (within 1 period), otherwise adjust
   const finalPeriods = Math.abs(needed - remainingScheduled) <= 1 ? remainingScheduled : Math.max(1, needed);
   return toISODate(addMonths(nextDueAdjusted, finalPeriods - 1));
+}
+
+// Projection with extras (principal-only), 30/360, fixed PI, monthly periods starting at next due.
+// `scheduledDone` lets caller pass how many scheduled installments have already been posted (to align remaining term).
+export function projectWithExtras({ loan, balanceStart, nextDueDate, extras = [], scheduledDone = 0 }) {
+  let bal = round2(balanceStart ?? 0);
+  if (bal <= 0) return { timeline: [], payoffDate: null, totals: { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 }, balanceEnd: 0 };
+  const apr = loan.APR ?? 0;
+  const pi = fixedPIForLoan(loan);
+  const baseStart = parseISO(nextDueDate || loan.NextPaymentDate || addMonths(parseISO(loan.OriginationDate), 1));
+  const start = addMonths(baseStart, scheduledDone); // advance start to reflect already-posted scheduled payments
+  const term = loan.TermMonths || 0;
+  const remainingScheduled = Math.max(1, term - scheduledDone);
+  const extrasMap = expandExtrasMap(extras, start);
+
+  const timeline = [];
+  let date = start;
+  let totalPaid = 0;
+  let totalInt = 0;
+  let totalPrin = 0;
+
+  for (let i = 0; i < Math.max(remainingScheduled + 120, 2400); i++) {
+    const extraForDate = extrasMap.get(toISODate(date)) || 0;
+
+    const interest = round2(bal * apr / 12);
+    const principal = Math.min(bal, Math.max(0, round2(pi - interest)));
+    const extraPrincipal = Math.min(Math.max(0, bal - principal), extraForDate);
+
+    const payment = round2(principal + interest + extraPrincipal);
+
+    totalPaid = round2(totalPaid + payment);
+    totalInt = round2(totalInt + interest);
+    totalPrin = round2(totalPrin + principal + extraPrincipal);
+
+    bal = round2(Math.max(0, bal - principal - extraPrincipal));
+
+    timeline.push({
+      date: toISODate(date),
+      payment,
+      interest,
+      principal: round2(principal + extraPrincipal),
+      balance: bal,
+      paid: totalPaid,
+      interestPaid: totalInt,
+      principalPaid: totalPrin,
+    });
+
+    if (bal <= EPS) break;
+    date = addMonths(date, 1);
+  }
+
+  const payoffDate = timeline.length ? timeline[timeline.length - 1].date : null;
+  return {
+    timeline,
+    payoffDate,
+    totals: { totalPaid: totalPaid, totalInterest: totalInt, totalPrincipal: totalPrin },
+    balanceEnd: bal,
+    schedule: timeline,
+  };
 }
