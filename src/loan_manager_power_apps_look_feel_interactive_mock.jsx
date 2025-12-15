@@ -967,6 +967,7 @@ export default function LoanManagerMock() {
     return projectWithExtras({ loan: { ...selected, OriginalPrincipal: selected?.OriginalPrincipal }, balanceStart: selected?.OriginalPrincipal, nextDueDate: firstDueOrig, extras: [], payments: [] });
   }, [selected]);
   const originalTotals = projectionOriginal?.totals ?? { totalPaid: 0, totalInterest: 0, totalPrincipal: 0 };
+  const lifetimeSavingsSoFar = round2((originalTotals.totalPaid ?? 0) - lifetimePaidCurrent); // realized from past extras/paydowns
   const lifetimeSavingsVsCurrent = round2(lifetimePaidCurrent - lifetimePaidWithExtras);
   const lifetimeSavingsVsOriginal = round2((originalTotals.totalPaid ?? 0) - projectionTotals.totalPaid);
   const interestSavedVsCurrent = round2(baseTotals.totalInterest - projectionTotals.totalInterest);
@@ -977,7 +978,8 @@ export default function LoanManagerMock() {
   const futurePrincipalLabel = money(projectionTotals.totalPrincipal);
   const lifetimePaidLabel = money(lifetimePaidWithExtras);
   const interestSavedLabel = Math.abs(interestSavedVsCurrent) > EPS ? money(interestSavedVsCurrent) : 'N/A';
-  const lifetimeSavingsLabel = Math.abs(lifetimeSavingsVsOriginal) > EPS ? money(lifetimeSavingsVsOriginal) : 'N/A';
+  const lifetimeSavingsTotal = round2(lifetimeSavingsSoFar + interestSavedVsCurrent);
+  const lifetimeSavingsLabel = Math.abs(lifetimeSavingsTotal) > EPS ? money(lifetimeSavingsTotal) : 'N/A';
   return (
     <div className="min-h-screen bg-gray-50 text-gray-600 w-full">
       {/* Header */}
@@ -1341,7 +1343,7 @@ export default function LoanManagerMock() {
               <div className="rounded-2xl bg-white shadow-sm border">
                 <div className="px-4 py-3 border-b flex items-center justify-between">
                   <div className="font-semibold">What-if Calculator</div>
-                  <div className="text-sm text-gray-600">Base schedule + your extras</div>
+                  <div className="text-sm text-gray-600">Original schedule + your extras</div>
                 </div>
                 <div className="p-4 grid md:grid-cols-2 gap-6">
                   {/* Left: extras config */}
@@ -1407,13 +1409,13 @@ export default function LoanManagerMock() {
                     <div className="font-medium mb-2">Modeled Results</div>
                     <div className="rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 gap-6">
                       <Stat label="Projected Payoff (with extras)" value={calcProjection?.payoffDate ? fmt(calcProjection.payoffDate) : '-'} />
-                      <Stat label="Base Payoff (no extras)" value={payoffDateBase ? fmt(payoffDateBase) : '-'} />
-                      <Stat label="Time Saved vs Base" value={timeSavedLabel} />
+                      <Stat label="Original Payoff (no extras)" value={payoffDateBase ? fmt(payoffDateBase) : '-'} />
+                      <Stat label="Time Saved vs Original" value={timeSavedLabel} />
                       <Stat label="Future Interest (with extras)" value={futureInterestLabel} />
                       <Stat label="Future Principal (with extras)" value={futurePrincipalLabel} />
-                      <Stat label="Interest Saved vs Base" value={interestSavedLabel} />
+                      <Stat label="Interest Saved vs Current" value={interestSavedLabel} />
                       <Stat label="Lifetime Total Paid (with extras)" value={lifetimePaidLabel} />
-                      <Stat label="Lifetime Savings vs Base" value={lifetimeSavingsLabel} />
+                      <Stat label="Lifetime Savings vs Original" value={lifetimeSavingsLabel} />
                     </div>
                     {/* Line chart */}
                     <div className="mt-4 h-64">
@@ -1437,7 +1439,7 @@ export default function LoanManagerMock() {
                 {/* Amortization aggregate */}
                 <div className="px-4 pb-4">
                   <div className="flex items-center justify-between py-2">
-                    <div className="font-medium">Amortization (by year)</div>
+                  <div className="font-medium">Amortization (by year)</div>
                   </div>
                   <div className="border rounded-xl divide-y">
                     {amortYearGroups.map((year) => {
