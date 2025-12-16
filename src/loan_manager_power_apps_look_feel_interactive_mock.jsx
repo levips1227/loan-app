@@ -40,6 +40,9 @@ const addYears = (date, years) => {
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
 const STORAGE_KEY = 'loan-manager-state-v1';
+const DEFAULT_ADMIN_USER = { username: 'Admin', password: '1227', role: 'Admin' };
+const PASSWORD_MIN_LENGTH = 8;
+const USER_ROLES = ['Admin', 'Standard User'];
 
 function loadPersistedState() {
   if (typeof window === 'undefined') return null;
@@ -55,10 +58,61 @@ function loadPersistedState() {
 function persistState(data) {
   if (typeof window === 'undefined') return;
   try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const existing = raw ? JSON.parse(raw) : {};
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...existing, ...data }));
   } catch (e) {
     console.warn('Failed to persist state', e);
   }
+}
+function bufferToBase64(buffer) {
+  const view = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer || buffer);
+  let binary = '';
+  for (let i = 0; i < view.length; i += 1) {
+    binary += String.fromCharCode(view[i]);
+  }
+  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
+}
+function generateSalt() {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+  if (cryptoObj?.getRandomValues) {
+    const arr = new Uint8Array(16);
+    cryptoObj.getRandomValues(arr);
+    return bufferToBase64(arr.buffer);
+  }
+  return bufferToBase64(new TextEncoder().encode(String(Math.random())).buffer);
+}
+async function hashPassword(password, salt) {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+  if (!cryptoObj?.subtle) throw new Error('Secure crypto unavailable in this environment');
+  const data = new TextEncoder().encode(`${password}:${salt}`);
+  const hashBuffer = await cryptoObj.subtle.digest('SHA-256', data);
+  return bufferToBase64(hashBuffer);
+}
+async function hashWithSalt(password, salt) {
+  const s = salt || generateSalt();
+  const passwordHash = await hashPassword(password, s);
+  return { salt: s, passwordHash };
+}
+async function verifyPassword(candidate, user) {
+  if (!user?.salt || !user?.passwordHash) return false;
+  try {
+    const hashed = await hashPassword(candidate, user.salt);
+    return hashed === user.passwordHash;
+  } catch (e) {
+    console.warn('Password verification failed', e);
+    return false;
+  }
+}
+function normalizeUsername(name) {
+  return (name || '').trim().replace(/\s+/g, ' ');
+}
+function nextUserId(list) {
+  return Math.max(0, ...list.map((u) => u.id || 0)) + 1;
+}
+function hasAnotherActiveAdmin(list, excludeId = null) {
+  const admins = list.filter((u) => u.role === 'Admin' && !u.disabled && u.id !== excludeId);
+  return admins.length > 0;
 }
 
 function nextByFreq(dt, freq) {
@@ -187,7 +241,7 @@ function projectToPayoff({ loan, balanceStart, startDate, extras = [], draws = [
     if (dd > startDate) events.push({ type: 'draw', date: dd, amount: round2(d.Amount || 0) });
   }
 
-  // Extras rules â†’ materialize into dated events
+  // Extras rules → materialize into dated events
   for (const r of extras) {
     if (!r || !(r.amount > 0)) continue;
     if (r.kind === 'once') {
@@ -452,7 +506,7 @@ function runSelfTests() {
     // Recalc tests (one simple loan, two payments, daily interest)
     const loan = { id: 1, OriginalPrincipal: 1000, APR: 0.10, OriginationDate: '2024-01-01', PaymentFrequency: 'Monthly', LoanType: 'Mortgage', TermMonths: 12 };
     const pmts = [
-      { id: 1, LoanRef: 1, PaymentDate: '2024-01-11', Amount: 100 }, // 10 days interest @10% on 1000 â‰ˆ 2.74
+      { id: 1, LoanRef: 1, PaymentDate: '2024-01-11', Amount: 100 }, // 10 days interest @10% on 1000 ≈ 2.74
       { id: 2, LoanRef: 1, PaymentDate: '2024-01-21', Amount: 100 }, // next 10 days on new balance
     ];
     const res = recalcLoanPayments(loan, pmts, []);
@@ -479,7 +533,7 @@ function runSelfTests() {
 
     // Frequency scaling (weekly)
     const loanW = { APR: 0, TermMonths: 12, PaymentFrequency: 'Weekly', LoanType: 'Mortgage', EscrowMonthly: 520 };
-    const schedW = scheduledPaymentFor(loanW, 12000, 12); // PI=12000/52â‰ˆ230.77, escrow per week=6240/52=120 => ~350.77
+    const schedW = scheduledPaymentFor(loanW, 12000, 12); // PI=12000/52≈230.77, escrow per week=6240/52=120 => ~350.77
     console.assert(nearlyEqual(schedW, round2(12000/52 + (520*12/52))), 'Scheduled weekly with escrow scaling');
 
     // Credit card minimum (weekly scaling from $25 monthly)
@@ -519,6 +573,23 @@ export default function LoanManagerMock() {
   const fmt = (d) => toISODate(d);
   const money = (n) => (n ?? 0).toLocaleString(undefined, { style: 'currency', currency: 'USD' });
 
+  // --- Auth + session ---
+  const [session, setSession] = React.useState(null);
+  const [users, setUsers] = React.useState([]);
+  const [authReady, setAuthReady] = React.useState(false);
+  const [loginUsername, setLoginUsername] = React.useState('');
+  const [loginPassword, setLoginPassword] = React.useState('');
+  const [loginError, setLoginError] = React.useState('');
+  const [loginBusy, setLoginBusy] = React.useState(false);
+
+  // --- Settings panel ---
+  const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const [currentPassword, setCurrentPassword] = React.useState('');
+  const [newPassword, setNewPassword] = React.useState('');
+  const [confirmPassword, setConfirmPassword] = React.useState('');
+  const [settingsError, setSettingsError] = React.useState('');
+  const [settingsSuccess, setSettingsSuccess] = React.useState('');
+
   // --- Admin defaults (editable & savable) ---
   const [admin, setAdmin] = React.useState({
     graceDaysDefault: 5,
@@ -526,18 +597,31 @@ export default function LoanManagerMock() {
     lateFeePctDefault: 4,
     frequencies: ['Monthly', 'Biweekly', 'Weekly', 'Quarterly', 'Annual'],
   });
+  const [adminTab, setAdminTab] = React.useState('defaults');
   const [adminDraft, setAdminDraft] = React.useState(null); // when overlay opens for editing
+  const [userForm, setUserForm] = React.useState({ username: '', password: '', confirm: '', role: 'Standard User' });
+  const [userEditId, setUserEditId] = React.useState(null);
+  const [userFormError, setUserFormError] = React.useState('');
+  const [userMgmtMessage, setUserMgmtMessage] = React.useState('');
+  const [resetUserId, setResetUserId] = React.useState(null);
+  const [resetPassword, setResetPassword] = React.useState('');
+  const [resetConfirm, setResetConfirm] = React.useState('');
 
-  function openAdmin() {
+  const isAdmin = session?.role === 'Admin';
+
+  function openAdmin(tab = 'defaults') {
+    if (!isAdmin) return;
     setAdminDraft({
       graceDaysDefault: String(admin.graceDaysDefault),
       lateFeeFlatDefault: String(admin.lateFeeFlatDefault),
       lateFeePctDefault: String(admin.lateFeePctDefault),
       frequencies: admin.frequencies.join(', '),
     });
+    setAdminTab(tab);
     setAdminOpen(true);
   }
   function saveAdmin() {
+    if (!isAdmin) return;
     const freqList = (adminDraft.frequencies || '')
       .split(',')
       .map((s) => s.trim())
@@ -572,6 +656,7 @@ export default function LoanManagerMock() {
 
   const [query, setQuery] = React.useState('');
   const [selectedId, setSelectedId] = React.useState(loans[0].id);
+  const [loanMenuId, setLoanMenuId] = React.useState(null);
   const [mode, setMode] = React.useState('details'); // 'details' | 'calc'
   const [adminOpen, setAdminOpen] = React.useState(false);
 
@@ -583,6 +668,13 @@ export default function LoanManagerMock() {
       setPayments(saved.payments || initialPayments);
       setDraws(saved.draws || []);
       if (saved.selectedId) setSelectedId(saved.selectedId);
+      if (saved.admin) {
+        setAdmin((prev) => ({
+          ...prev,
+          ...saved.admin,
+          frequencies: Array.isArray(saved.admin.frequencies) ? saved.admin.frequencies : prev.frequencies,
+        }));
+      }
       hydrated.current = true;
     } else {
       // initial normalize
@@ -594,8 +686,255 @@ export default function LoanManagerMock() {
 
   React.useEffect(() => {
     if (!hydrated.current) return;
-    persistState({ loans, payments, draws, selectedId });
-  }, [loans, payments, draws, selectedId]);
+    persistState({ loans, payments, draws, selectedId, admin });
+  }, [loans, payments, draws, selectedId, admin]);
+
+  // Auth bootstrap
+  React.useEffect(() => {
+    let cancelled = false;
+    async function initAuth() {
+      const saved = loadPersistedState() || {};
+      let nextUsers = Array.isArray(saved.users) ? saved.users : [];
+      const hasDefaultAdmin = nextUsers.some((u) => (u.username || '').toLowerCase() === DEFAULT_ADMIN_USER.username.toLowerCase());
+      if (!hasDefaultAdmin) {
+        try {
+          const creds = await hashWithSalt(DEFAULT_ADMIN_USER.password);
+          const adminUser = {
+            id: nextUserId(nextUsers),
+            username: DEFAULT_ADMIN_USER.username,
+            role: DEFAULT_ADMIN_USER.role,
+            ...creds,
+            disabled: false,
+            createdAt: new Date().toISOString(),
+          };
+          nextUsers = [...nextUsers, adminUser];
+        } catch (e) {
+          console.warn('Unable to seed default admin user', e);
+        }
+      }
+      if (cancelled) return;
+      const storedSession = saved.session;
+      let restoredSession = null;
+      if (storedSession) {
+        const live = nextUsers.find((u) => u.username === storedSession.username);
+        if (live && !live.disabled) {
+          restoredSession = { username: live.username, role: live.role };
+        }
+      }
+      setUsers(nextUsers);
+      setSession(restoredSession);
+      setAuthReady(true);
+      persistState({ users: nextUsers, session: restoredSession });
+    }
+    initAuth();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Persist auth changes
+  React.useEffect(() => {
+    if (!authReady) return;
+    persistState({ users, session });
+  }, [users, session, authReady]);
+
+  // Keep session in sync with latest user shape or disable if revoked
+  React.useEffect(() => {
+    if (!authReady || !session) return;
+    const live = users.find((u) => u.username === session.username);
+    if (!live || live.disabled) {
+      setSession(null);
+      setAdminOpen(false);
+      setSettingsOpen(false);
+      return;
+    }
+    if (live.role !== session.role || live.username !== session.username) {
+      setSession({ username: live.username, role: live.role });
+    }
+  }, [users, session, authReady]);
+
+  React.useEffect(() => {
+    if (!isAdmin && adminOpen) setAdminOpen(false);
+  }, [isAdmin, adminOpen]);
+
+  const sortedUsers = React.useMemo(() => [...users].sort((a, b) => a.username.localeCompare(b.username)), [users]);
+  const activeAdminCount = React.useMemo(
+    () => users.filter((u) => u.role === 'Admin' && !u.disabled).length,
+    [users],
+  );
+
+  async function handleLogin(e) {
+    e?.preventDefault?.();
+    setLoginError('');
+    if (!authReady) { setLoginError('Initializing... please try again.'); return; }
+    const username = normalizeUsername(loginUsername);
+    const password = loginPassword;
+    if (!username || !password) { setLoginError('Username and password are required.'); return; }
+    const user = users.find((u) => (u.username || '').toLowerCase() === username.toLowerCase());
+    if (!user) { setLoginError('Incorrect username or password.'); return; }
+    if (user.disabled) { setLoginError('This account is disabled.'); return; }
+    setLoginBusy(true);
+    try {
+      const ok = await verifyPassword(password, user);
+      if (!ok) {
+        setLoginError('Incorrect username or password.');
+      } else {
+        setSession({ username: user.username, role: user.role });
+        setLoginPassword('');
+        setLoginError('');
+      }
+    } catch (err) {
+      setLoginError('Unable to sign in right now.');
+      console.warn(err);
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
+  function handleLogout() {
+    setSession(null);
+    setAdminOpen(false);
+    setSettingsOpen(false);
+    setLoginError('');
+    setLoginPassword('');
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+  }
+
+  async function handleChangeOwnPassword() {
+    if (!session) { setSettingsError('You must be logged in.'); return; }
+    setSettingsError('');
+    setSettingsSuccess('');
+    const current = currentPassword;
+    const next = newPassword;
+    const nextConfirm = confirmPassword;
+    if (!current || !next || !nextConfirm) { setSettingsError('All password fields are required.'); return; }
+    if (next !== nextConfirm) { setSettingsError('New passwords do not match.'); return; }
+    if (next.length < PASSWORD_MIN_LENGTH) { setSettingsError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
+    const user = users.find((u) => u.username === session.username);
+    if (!user) { setSettingsError('Session expired.'); setSession(null); return; }
+    const ok = await verifyPassword(current, user);
+    if (!ok) { setSettingsError('Current password is incorrect.'); return; }
+    if (current === next) { setSettingsError('Choose a password different from the current one.'); return; }
+    try {
+      const creds = await hashWithSalt(next);
+      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, ...creds } : u)));
+      setSettingsSuccess('Password updated successfully.');
+      setCurrentPassword('');
+      setNewPassword('');
+      setConfirmPassword('');
+    } catch (e) {
+      console.warn('Password update failed', e);
+      setSettingsError('Could not update password securely.');
+    }
+  }
+
+  function resetUserFormState() {
+    setUserEditId(null);
+    setUserForm({ username: '', password: '', confirm: '', role: 'Standard User' });
+    setUserFormError('');
+  }
+  function beginEditUser(user) {
+    setUserEditId(user.id);
+    setUserForm({ username: user.username, password: '', confirm: '', role: user.role });
+    setUserFormError('');
+    setUserMgmtMessage('');
+    setResetUserId(null);
+    setResetPassword('');
+    setResetConfirm('');
+  }
+  async function saveUserFromAdmin() {
+    if (!isAdmin) { setUserFormError('Admin access required.'); return; }
+    setUserFormError('');
+    setUserMgmtMessage('');
+    const username = normalizeUsername(userForm.username);
+    const role = USER_ROLES.includes(userForm.role) ? userForm.role : 'Standard User';
+    if (!username) { setUserFormError('Username is required.'); return; }
+    if (!userEditId) {
+      if (!userForm.password || !userForm.confirm) { setUserFormError('Password and confirmation are required.'); return; }
+      if (userForm.password !== userForm.confirm) { setUserFormError('Passwords do not match.'); return; }
+      if (userForm.password.length < PASSWORD_MIN_LENGTH) { setUserFormError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
+      const exists = users.some((u) => (u.username || '').toLowerCase() === username.toLowerCase());
+      if (exists) { setUserFormError('Username already exists.'); return; }
+      let creds;
+      try {
+        creds = await hashWithSalt(userForm.password);
+      } catch (e) {
+        console.warn('Hashing failed', e);
+        setUserFormError('Could not secure password.'); return;
+      }
+      const newUser = {
+        id: nextUserId(users),
+        username,
+        role,
+        ...creds,
+        disabled: false,
+        createdAt: new Date().toISOString(),
+      };
+      setUsers((prev) => [...prev, newUser]);
+      setUserMgmtMessage('User created.');
+      resetUserFormState();
+    } else {
+      const existing = users.find((u) => u.id === userEditId);
+      if (!existing) { setUserFormError('User not found.'); return; }
+      const exists = users.some((u) => u.id !== userEditId && (u.username || '').toLowerCase() === username.toLowerCase());
+      if (exists) { setUserFormError('Username already exists.'); return; }
+      if (existing.role === 'Admin' && role !== 'Admin' && !hasAnotherActiveAdmin(users, existing.id)) {
+        setUserFormError('At least one admin must remain.'); return;
+      }
+      const updated = { ...existing, username, role };
+      setUsers((prev) => prev.map((u) => (u.id === userEditId ? updated : u)));
+      if (session?.username === existing.username) setSession({ username, role });
+      setUserMgmtMessage('User updated.');
+      resetUserFormState();
+    }
+  }
+  function toggleUserDisabled(user) {
+    if (!isAdmin) return;
+    const disabling = !user.disabled;
+    if (disabling && user.role === 'Admin' && !hasAnotherActiveAdmin(users, user.id)) {
+      setUserMgmtMessage('Keep at least one admin active.'); return;
+    }
+    setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, disabled: !u.disabled } : u)));
+    if (disabling && session?.username === user.username) {
+      handleLogout();
+    }
+  }
+  async function resetPasswordForUser(userId) {
+    if (!isAdmin) return;
+    setUserMgmtMessage('');
+    if (!resetPassword || !resetConfirm) { setUserMgmtMessage('Enter password and confirmation.'); return; }
+    if (resetPassword !== resetConfirm) { setUserMgmtMessage('Passwords do not match.'); return; }
+    if (resetPassword.length < PASSWORD_MIN_LENGTH) { setUserMgmtMessage(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
+    const target = users.find((u) => u.id === userId);
+    if (!target) { setUserMgmtMessage('User not found.'); return; }
+    let creds;
+    try {
+      creds = await hashWithSalt(resetPassword);
+    } catch (e) {
+      console.warn('Reset failed', e);
+      setUserMgmtMessage('Could not secure password.'); return;
+    }
+    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...creds } : u)));
+    setUserMgmtMessage(`Password reset for ${target.username}.`);
+    setResetUserId(null);
+    setResetPassword('');
+    setResetConfirm('');
+  }
+  function startReset(user) {
+    setResetUserId(user.id);
+    setResetPassword('');
+    setResetConfirm('');
+    setUserMgmtMessage('');
+  }
+  function deleteUser(user) {
+    if (!isAdmin) return;
+    if (user.role === 'Admin' && !hasAnotherActiveAdmin(users, user.id)) {
+      setUserFormError('Cannot delete the last admin.'); return;
+    }
+    if (!window.confirm(`Delete user "${user.username}"? This cannot be undone.`)) return;
+    setUsers((prev) => prev.filter((u) => u.id !== user.id));
+    if (session?.username === user.username) handleLogout();
+  }
 
   const selected = loans.find((l) => l.id === selectedId);
   const loanPaymentsDesc = payments
@@ -616,6 +955,45 @@ export default function LoanManagerMock() {
   const scheduledCurrent = scheduledPaymentFor(selected, balance);
 
   const filteredLoans = loans.filter((l) => !query || l.BorrowerName.toLowerCase().includes(query.toLowerCase()) || l.LoanID.toLowerCase().includes(query.toLowerCase()));
+  function nextLoanId() {
+    return Math.max(0, ...loans.map((l) => l.id || 0)) + 1;
+  }
+  function uniqueLoanId(base) {
+    const taken = new Set(loans.map((l) => (l.LoanID || '').toLowerCase()));
+    const seed = base || `LN-${String(nextLoanId()).padStart(4, '0')}`;
+    if (!taken.has(seed.toLowerCase())) return seed;
+    let idx = 1;
+    let candidate = `${seed}-${idx}`;
+    while (taken.has(candidate.toLowerCase())) {
+      idx += 1;
+      candidate = `${seed}-${idx}`;
+    }
+    return candidate;
+  }
+  function duplicateLoan(loan) {
+    const newId = nextLoanId();
+    const clone = {
+      ...loan,
+      id: newId,
+      LoanID: uniqueLoanId(loan.LoanID),
+      BorrowerName: `${loan.BorrowerName} (copy)`,
+      Status: 'Active',
+    };
+    setLoans((prev) => [...prev, clone]);
+    setSelectedId(newId);
+    setLoanMenuId(null);
+  }
+  function deleteLoan(loan) {
+    if (!window.confirm(`Delete loan "${loan.BorrowerName}" (${loan.LoanID})? This removes its payments and draws.`)) return;
+    setLoans((prev) => prev.filter((l) => l.id !== loan.id));
+    setPayments((prev) => prev.filter((p) => p.LoanRef !== loan.id));
+    setDraws((prev) => prev.filter((d) => d.LoanRef !== loan.id));
+    setLoanMenuId(null);
+    if (selectedId === loan.id) {
+      const remaining = loans.filter((l) => l.id !== loan.id);
+      setSelectedId(remaining.length ? remaining[0].id : null);
+    }
+  }
 
   // Estimate payoff date using fixed PI schedule from next due date
   const nextDue = selected?.NextPaymentDate || toISODate(addMonths(parseISO(selected?.OriginationDate), 1));
@@ -762,6 +1140,7 @@ export default function LoanManagerMock() {
   const [pExtra, setPExtra] = React.useState('');
   const [pMethod, setPMethod] = React.useState('ACH');
   const [pRef, setPRef] = React.useState('');
+  const [paymentModalOpen, setPaymentModalOpen] = React.useState(false);
 
   // Prefill when switching loans or changing schedule
   React.useEffect(() => {
@@ -787,8 +1166,8 @@ export default function LoanManagerMock() {
 
   function postPayment() {
     const amt = Number(pAmt);
-    if (!selected) return;
-    if (!pDate || isNaN(amt) || amt <= 0) { alert('Enter a valid amount and date.'); return; }
+    if (!selected) return false;
+    if (!pDate || isNaN(amt) || amt <= 0) { alert('Enter a valid amount and date.'); return false; }
 
     const nextId = Math.max(0, ...payments.map((x) => x.id)) + 1;
     const newRow = {
@@ -814,6 +1193,7 @@ export default function LoanManagerMock() {
     setPExtra('');
     setPScheduled(true);
     setPRef('');
+    return true;
   }
 
   // Inline edit state for payments
@@ -980,6 +1360,27 @@ export default function LoanManagerMock() {
   const interestSavedLabel = Math.abs(interestSavedVsCurrent) > EPS ? money(interestSavedVsCurrent) : 'N/A';
   const lifetimeSavingsTotal = round2(lifetimeSavingsSoFar + interestSavedVsCurrent);
   const lifetimeSavingsLabel = Math.abs(lifetimeSavingsTotal) > EPS ? money(lifetimeSavingsTotal) : 'N/A';
+
+  if (!authReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
+        <div className="rounded-xl bg-white shadow-lg border px-6 py-4 text-sm">Loading security and session...</div>
+      </div>
+    );
+  }
+  if (!session) {
+    return (
+      <LoginView
+        username={loginUsername}
+        password={loginPassword}
+        onUsernameChange={setLoginUsername}
+        onPasswordChange={setLoginPassword}
+        onSubmit={handleLogin}
+        error={loginError}
+        busy={loginBusy}
+      />
+    );
+  }
   return (
     <div className="min-h-screen bg-gray-50 text-gray-600 w-full">
       {/* Header */}
@@ -987,30 +1388,213 @@ export default function LoanManagerMock() {
         <div className="mx-auto w-full px-4 py-3 flex items-center gap-3">
           <div className="shrink-0 rounded-xl bg-violet-600 px-3 py-1 text-white font-semibold">Loan Manager</div>
 
-          {/* Header buttons */}
-          <button onClick={openAdmin} className="text-xs rounded-md border px-3 py-1">Admin</button>
+          {isAdmin && (
+            <button onClick={() => openAdmin('defaults')} className="text-xs rounded-md border px-3 py-1">Admin</button>
+          )}
 
-          <input
-            className="ml-auto w-72 rounded-xl border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-            placeholder="Search borrower or Loan ID"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-          />
+          <div className="ml-auto flex items-center gap-3 w-full justify-end">
+            <input
+              className="w-52 sm:w-64 md:w-72 rounded-xl border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+              placeholder="Search borrower or Loan ID"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            {isAdmin && (
+              <button onClick={() => openAdmin('users')} className="hidden sm:inline-flex text-xs rounded-md border px-3 py-1">Users</button>
+            )}
+            <div className="hidden sm:flex text-xs text-gray-600 items-center gap-1">
+              <span className="font-semibold text-gray-800">{session.username}</span>
+              <span className="text-gray-500">({session.role})</span>
+            </div>
+            <button onClick={() => setSettingsOpen(true)} className="w-10 h-10 flex items-center justify-center rounded-full border border-gray-300 hover:bg-gray-100 transition">
+              <GearIcon className="text-gray-700" />
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* Admin overlay (editable & savable) */}
-      {adminOpen && (
+      {/* Settings overlay */}
+      {settingsOpen && (
         <div className="fixed inset-0 z-20 bg-gray-500/20 flex items-center justify-center">
-          <div className="w-[760px] max-w-[92vw] rounded-2xl bg-white shadow-xl border p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="font-semibold">Admin Settings</div>
+          <div className="w-[460px] max-w-[92vw] rounded-2xl bg-white shadow-xl border p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="font-semibold">User Settings</div>
+              <button onClick={() => setSettingsOpen(false)} className="text-xs rounded-md border px-3 py-1">Close</button>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <FormRow label="Username">
+                <div className="rounded-xl border bg-gray-50 px-3 py-2">{session.username}</div>
+              </FormRow>
+              <FormRow label="Role">
+                <div className="rounded-xl border bg-gray-50 px-3 py-2">{session.role}</div>
+              </FormRow>
+            </div>
+            <div className="space-y-2 text-sm">
+              <div className="font-semibold text-gray-800">Change password</div>
+              {settingsError && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2">{settingsError}</div>}
+              {settingsSuccess && <div className="rounded-lg border border-green-200 bg-green-50 text-green-700 px-3 py-2">{settingsSuccess}</div>}
+              <FormRow label="Current password">
+                <input type="password" value={currentPassword} onChange={(e)=>setCurrentPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </FormRow>
+              <FormRow label={`New password (min ${PASSWORD_MIN_LENGTH})`}>
+                <input type="password" value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </FormRow>
+              <FormRow label="Confirm new password">
+                <input type="password" value={confirmPassword} onChange={(e)=>setConfirmPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </FormRow>
+              <div className="flex justify-end gap-2">
+                <button onClick={handleChangeOwnPassword} className="text-xs rounded-md bg-violet-600 text-white px-3 py-2">Update Password</button>
+              </div>
+            </div>
+            <div className="flex items-center justify-between pt-2">
+              <div className="text-xs text-gray-500">You stay signed in until you log out.</div>
+              <button onClick={handleLogout} className="text-xs rounded-md border px-3 py-1">Log out</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* New Loan modal */}
+      {nlOpen && (
+        <div className="fixed inset-0 z-30 bg-black/40 flex items-center justify-center px-3 py-6">
+          <div className="w-[980px] max-w-[96vw] max-h-[90vh] overflow-y-auto rounded-2xl bg-white shadow-2xl border">
+            <div className="px-4 py-3 border-b flex items-center justify-between sticky top-0 bg-white/95 backdrop-blur">
+              <div className="font-semibold text-lg">New Loan</div>
+              <button onClick={toggleNewLoan} className="text-xs rounded-full border px-3 py-2">Close</button>
+            </div>
+            <div className="p-4 grid grid-cols-2 gap-3 text-sm">
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Borrower</label>
+                <input value={nlBorrower} onChange={(e)=>setNlBorrower(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Full name" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Principal</label>
+                <input type="number" min="0" step="0.01" value={nlPrincipal} onChange={(e)=>setNlPrincipal(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">APR % (e.g. 6.50)</label>
+                <input type="number" min="0" step="0.01" value={nlAPR} onChange={(e)=>setNlAPR(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Term (months)</label>
+                <input type="number" min="1" step="1" value={nlTerm} onChange={(e)=>setNlTerm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Type</label>
+                <select value={nlType} onChange={(e)=>setNlType(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                  {['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card'].map(t => <option key={t} value={t}>{t}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="inline-flex items-center mt-2">
+                  <input type="checkbox" checked={nlFixedPayment} onChange={(e)=>setNlFixedPayment(e.target.checked)} className="mr-2" />
+                  <span className="text-xs text-gray-600">Fixed payment</span>
+                </label>
+              </div>
+              {nlType === 'Revolving LOC' && (
+                <div>
+                  <label className="block text-xs text-gray-600 mb-1">Credit Limit</label>
+                  <input type="number" min="0" step="0.01" value={nlCreditLimit} onChange={(e)=>setNlCreditLimit(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                </div>
+              )}
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Origination Date</label>
+                <input type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Next Payment Date</label>
+                <input type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Frequency</label>
+                <select value={nlFreq} onChange={(e)=>setNlFreq(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                  {admin.frequencies.map(f => <option key={f} value={f}>{f}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Escrow (monthly)</label>
+                <input type="number" min="0" step="0.01" value={nlEscrow} onChange={(e)=>setNlEscrow(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Grace Days</label>
+                <input type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div className="col-span-2 flex items-center justify-between">
+                <div className="text-xs text-gray-600">{estNewPerLabel}</div>
+                <div className="font-semibold">{money(estNewPerWithEscrow)}</div>
+              </div>
+              <div className="col-span-2 flex justify-end gap-2">
+                <button onClick={toggleNewLoan} className="rounded-xl border px-4 py-2 text-sm">Cancel</button>
+                <button onClick={createLoan} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Create Loan</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Payment modal */}
+      {paymentModalOpen && (
+        <div className="fixed inset-0 z-30 bg-black/40 flex items-center justify-center px-3 py-6">
+          <div className="w-[880px] max-w-[96vw] rounded-2xl bg-white shadow-2xl border">
+            <div className="px-4 py-3 flex items-center justify-between bg-white rounded-t-2xl border-b">
+              <div className="font-semibold text-lg">Post Payment</div>
+              <button onClick={() => setPaymentModalOpen(false)} className="text-xs rounded-full border px-3 py-2">Close</button>
+            </div>
+            <div className="p-4 grid md:grid-cols-6 gap-3 items-start text-sm">
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Payment date</label>
+                <input type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                <input type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                <div className="text-[11px] text-gray-500 mt-1">Prefilled with {selected.PaymentFrequency || 'Monthly'}: {money(pScheduled || 0)}</div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
+                <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+              </div>
+              <div className="md:col-span-2 flex items-start gap-2">
+                <input id="scheduledFlagModal" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
+                <label htmlFor="scheduledFlagModal" className="text-sm text-gray-700">
+                  Apply as scheduled monthly payment (early regular payment). Uncheck to post as unscheduled principal-only curtailment.
+                </label>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Method</label>
+                <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                  {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
+                </select>
+              </div>
+              <div className="md:col-span-4">
+                <label className="block text-xs text-gray-600 mb-1">Reference</label>
+                <input value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
+              </div>
+              <div className="md:col-span-6 flex justify-end gap-2">
+                <button onClick={() => setPaymentModalOpen(false)} className="rounded-xl border px-4 py-2 text-sm">Cancel</button>
+                <button onClick={() => { if (postPayment()) setPaymentModalOpen(false); }} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Post Payment</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Admin overlay (editable & savable) */}
+      {adminOpen && isAdmin && (
+        <div className="fixed inset-0 z-20 bg-gray-500/20 flex items-center justify-center">
+          <div className="w-[920px] max-w-[95vw] rounded-2xl bg-white shadow-xl border p-4 space-y-4">
+            <div className="flex items-center justify-between mb-1">
+              <div className="font-semibold">Admin</div>
               <div className="flex gap-2">
-                <button onClick={saveAdmin} className="text-xs rounded-md bg-violet-600 text-white px-3 py-1">Save</button>
+                {adminTab === 'defaults' && <button onClick={saveAdmin} className="text-xs rounded-md bg-violet-600 text-white px-3 py-1">Save</button>}
                 <button onClick={() => setAdminOpen(false)} className="text-xs rounded-md border px-3 py-1">Close</button>
               </div>
             </div>
-            {!!adminDraft && (
+            <div className="flex gap-2 border-b pb-2">
+              <button onClick={() => setAdminTab('defaults')} className={`text-xs rounded-md px-3 py-1 border ${adminTab==='defaults' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-100'}`}>Defaults</button>
+              <button onClick={() => setAdminTab('users')} className={`text-xs rounded-md px-3 py-1 border ${adminTab==='users' ? 'bg-violet-600 text-white border-violet-600' : 'bg-gray-100'}`}>Users</button>
+            </div>
+            {adminTab === 'defaults' && !!adminDraft && (
               <div className="grid sm:grid-cols-2 gap-3 text-sm">
                 <FormRow label="Grace days (default)">
                   <input type="number" min={0} value={adminDraft.graceDaysDefault} onChange={(e)=>setAdminDraft({...adminDraft,graceDaysDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
@@ -1026,6 +1610,94 @@ export default function LoanManagerMock() {
                 </FormRow>
               </div>
             )}
+            {adminTab === 'users' && (
+              <div className="space-y-3 text-sm">
+                {userFormError && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2">{userFormError}</div>}
+                {userMgmtMessage && <div className="rounded-lg border border-green-200 bg-green-50 text-green-700 px-3 py-2">{userMgmtMessage}</div>}
+                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
+                  <FormRow label="Username">
+                    <input value={userForm.username} onChange={(e)=>setUserForm((p)=>({...p,username:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                  </FormRow>
+                  <FormRow label="Role">
+                    <select value={userForm.role} onChange={(e)=>setUserForm((p)=>({...p,role:e.target.value}))} className="w-full rounded-xl border px-3 py-2">
+                      {USER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    </select>
+                  </FormRow>
+                  {!userEditId && (
+                    <FormRow label={`Password (min ${PASSWORD_MIN_LENGTH})`}>
+                      <input type="password" value={userForm.password} onChange={(e)=>setUserForm((p)=>({...p,password:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                    </FormRow>
+                  )}
+                  {!userEditId && (
+                    <FormRow label="Confirm password">
+                      <input type="password" value={userForm.confirm} onChange={(e)=>setUserForm((p)=>({...p,confirm:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                    </FormRow>
+                  )}
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="text-xs text-gray-500">Active admins: {activeAdminCount}</div>
+                  <div className="flex items-center gap-2">
+                    {userEditId && <button onClick={() => { resetUserFormState(); setUserMgmtMessage(''); }} className="text-xs rounded-md border px-3 py-1">Cancel edit</button>}
+                    <button onClick={saveUserFromAdmin} className="text-xs rounded-md bg-violet-600 text-white px-3 py-2">{userEditId ? 'Save Changes' : 'Create User'}</button>
+                  </div>
+                </div>
+                <div className="overflow-auto">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-gray-50 text-gray-600">
+                      <tr>
+                        <Th>Username</Th>
+                        <Th>Role</Th>
+                        <Th>Status</Th>
+                        <Th className="text-right">Actions</Th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sortedUsers.map((u) => (
+                        <React.Fragment key={u.id}>
+                          <tr className="border-b last:border-0">
+                            <Td>{u.username}</Td>
+                            <Td>{u.role}</Td>
+                            <Td>
+                              <span className={`rounded-full px-2 py-1 text-xs ${u.disabled ? 'bg-gray-100 text-gray-600' : 'bg-green-100 text-green-700'}`}>
+                                {u.disabled ? 'Disabled' : 'Active'}
+                              </span>
+                            </Td>
+                            <Td>
+                              <div className="flex flex-wrap gap-2 justify-end">
+                                <button onClick={() => beginEditUser(u)} className="text-xs rounded-md border px-3 py-1">Edit</button>
+                                <button onClick={() => toggleUserDisabled(u)} className="text-xs rounded-md border px-3 py-1">{u.disabled ? 'Enable' : 'Disable'}</button>
+                                <button onClick={() => startReset(u)} className="text-xs rounded-md border px-3 py-1">Reset Password</button>
+                                <button onClick={() => deleteUser(u)} className="text-xs rounded-md border px-3 py-1 text-red-600 border-red-200">Delete</button>
+                              </div>
+                            </Td>
+                          </tr>
+                          {resetUserId === u.id && (
+                            <tr className="bg-gray-50 border-b last:border-0">
+                              <Td colSpan={4}>
+                                <div className="grid sm:grid-cols-2 gap-3 items-end">
+                                  <div>
+                                    <label className="text-xs text-gray-600 mb-1 block">New password</label>
+                                    <input type="password" value={resetPassword} onChange={(e)=>setResetPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                                  </div>
+                                  <div>
+                                    <label className="text-xs text-gray-600 mb-1 block">Confirm password</label>
+                                    <input type="password" value={resetConfirm} onChange={(e)=>setResetConfirm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                                  </div>
+                                  <div className="flex gap-2 sm:col-span-2 justify-end">
+                                    <button onClick={() => { setResetUserId(null); setResetPassword(''); setResetConfirm(''); }} className="text-xs rounded-md border px-3 py-1">Cancel</button>
+                                    <button onClick={() => resetPasswordForUser(u.id)} className="text-xs rounded-md bg-violet-600 text-white px-3 py-2">Save Password</button>
+                                  </div>
+                                </div>
+                              </Td>
+                            </tr>
+                          )}
+                        </React.Fragment>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1034,93 +1706,57 @@ export default function LoanManagerMock() {
       <div className="mx-auto w-full px-4 py-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left: Loans list + New Loan */}
         <div className="lg:col-span-1 space-y-6">
-          {/* New Loan Card */}
-          <div className="rounded-2xl bg-white shadow-sm border">
-            <div className="px-4 py-3 border-b flex items-center justify-between">
-              <div className="font-semibold">New Loan</div>
-              <button onClick={toggleNewLoan} className="text-xs text-gray-600">{nlOpen ? 'Hide' : 'Show'}</button>
-            </div>
-            {nlOpen && (
-              <div className="p-4 grid grid-cols-2 gap-3 text-sm">
-                <div className="col-span-2">
-                  <label className="block text-xs text-gray-600 mb-1">Borrower</label>
-                  <input value={nlBorrower} onChange={(e)=>setNlBorrower(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Full name" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Principal</label>
-                  <input type="number" min="0" step="0.01" value={nlPrincipal} onChange={(e)=>setNlPrincipal(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">APR % (e.g. 6.50)</label>
-                  <input type="number" min="0" step="0.01" value={nlAPR} onChange={(e)=>setNlAPR(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Term (months)</label>
-                  <input type="number" min="1" step="1" value={nlTerm} onChange={(e)=>setNlTerm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Type</label>
-                  <select value={nlType} onChange={(e)=>setNlType(e.target.value)} className="w-full rounded-xl border px-3 py-2">
-                    {['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card'].map(t => <option key={t} value={t}>{t}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="inline-flex items-center mt-2">
-                    <input type="checkbox" checked={nlFixedPayment} onChange={(e)=>setNlFixedPayment(e.target.checked)} className="mr-2" />
-                    <span className="text-xs text-gray-600">Fixed payment</span>
-                  </label>
-                </div>
-                {nlType === 'Revolving LOC' && (
-                  <div>
-                    <label className="block text-xs text-gray-600 mb-1">Credit Limit</label>
-                    <input type="number" min="0" step="0.01" value={nlCreditLimit} onChange={(e)=>setNlCreditLimit(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                  </div>
-                )}
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Origination Date</label>
-                  <input type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Next Payment Date</label>
-                  <input type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Frequency</label>
-                  <select value={nlFreq} onChange={(e)=>setNlFreq(e.target.value)} className="w-full rounded-xl border px-3 py-2">
-                    {admin.frequencies.map(f => <option key={f} value={f}>{f}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Escrow (monthly)</label>
-                  <input type="number" min="0" step="0.01" value={nlEscrow} onChange={(e)=>setNlEscrow(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div>
-                  <label className="block text-xs text-gray-600 mb-1">Grace Days</label>
-                  <input type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
-                </div>
-                <div className="col-span-2 flex items-center justify-between">
-                  <div className="text-xs text-gray-600">{estNewPerLabel}</div>
-                  <div className="font-semibold">{money(estNewPerWithEscrow)}</div>
-                </div>
-                <div className="col-span-2 flex justify-end">
-                  <button onClick={createLoan} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Create Loan</button>
-                </div>
-              </div>
-            )}
-          </div>
-
           {/* Loans list */}
           <div className="rounded-2xl bg-white shadow-sm border">
             <div className="px-4 py-3 border-b flex items-center justify-between">
               <div className="font-semibold">Loans</div>
-              <div className="text-xs text-gray-500">{filteredLoans.length} shown</div>
+              <div className="flex items-center gap-2">
+                <div className="text-xs text-gray-500">{filteredLoans.length} shown</div>
+                <button onClick={toggleNewLoan} className="rounded-full bg-violet-600 text-white text-xs px-3 py-2 shadow hover:bg-violet-700">New Loan</button>
+              </div>
             </div>
             <ul className="divide-y">
               {filteredLoans.map((l) => (
-                <li key={l.id} onClick={() => setSelectedId(l.id)} className={`px-4 py-3 cursor-pointer hover:bg-violet-50 ${selectedId === l.id ? 'bg-violet-50' : ''}`}>
-                  <div className="flex items-center justify-between">
+                <li key={l.id} onClick={() => setSelectedId(l.id)} className={`relative px-4 py-3 cursor-pointer hover:bg-violet-50 ${selectedId === l.id ? 'bg-violet-50' : ''}`}>
+                  <div className="flex items-center justify-between gap-2">
                     <div className="font-medium">{l.BorrowerName}</div>
-                    <div className="text-xs text-gray-500">{l.LoanID}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-xs text-gray-500">{l.LoanID}</div>
+                      <div className="relative">
+                        <button
+                          style={{
+                            width: '32px',
+                            height: '32px',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '9999px',
+                            background: '#ffffff',
+                            color: '#111827',
+                            cursor: 'pointer',
+                            padding: 0,
+                          }}
+                          className="loan-actions-button"
+                          onClick={(e) => { e.stopPropagation(); setLoanMenuId(loanMenuId === l.id ? null : l.id); }}
+                          aria-label="Loan actions"
+                          title="Loan actions"
+                        >
+                          <span
+                            aria-hidden="true"
+                            style={{ fontSize: '18px', lineHeight: 1, display: 'block' }}
+                          >
+                            ⋯
+                          </span>
+                        </button>
+                        {loanMenuId === l.id && (
+                          <div className="absolute right-0 mt-1 w-32 rounded-xl border bg-white shadow-lg z-10" onClick={(e)=>e.stopPropagation()}>
+                            <button className="w-full text-left px-3 py-2 text-sm hover:bg-gray-50" onClick={() => duplicateLoan(l)}>Duplicate</button>
+                            <button className="w-full text-left px-3 py-2 text-sm text-red-600 hover:bg-red-50" onClick={() => deleteLoan(l)}>Delete</button>
+                          </div>
+                        )}
+                      </div>
+                    </div>
                   </div>
                   <div className="text-sm text-gray-600">{money(l.OriginalPrincipal)} @ {(l.APR * 100).toFixed(2)}%</div>
                   <div className="text-xs text-gray-500">Next due: {fmt(l.NextPaymentDate)}</div>
@@ -1143,7 +1779,10 @@ export default function LoanManagerMock() {
               {/* Summary card */}
               <div className="rounded-2xl bg-white shadow-sm border">
                 <div className="px-4 py-3 border-b flex items-center justify-between">
-                  <div className="font-semibold">Loan Details</div>
+                  <div className="font-semibold flex items-center gap-2">
+                    <span>Loan Details</span>
+                    <button onClick={() => setPaymentModalOpen(true)} className="rounded-full bg-violet-600 text-white px-3 py-1 text-xs shadow hover:bg-violet-700">Record Payment</button>
+                  </div>
                   <div className="flex items-center gap-3">
                     <div className="text-sm text-gray-600">{(selected.PaymentFrequency || 'Monthly')} Payment (est.): <span className="font-semibold">{money(scheduledCurrent)}</span></div>
                     {editMode ? (
@@ -1158,31 +1797,37 @@ export default function LoanManagerMock() {
                 </div>
 
                 {/* Details grid (editable when editMode) */}
-                <div className="p-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
-                  <Editable label="Borrower" value={selected.BorrowerName} edit={editMode} onChange={(v)=>setEl(s=>({...s,BorrowerName:v}))} />
-                  <Readonly label="Loan ID" value={selected.LoanID} />
-                  <EditableSelect label="Type" value={selected.LoanType} options={['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card']} edit={editMode} onChange={(v)=>setEl(s=>({...s,LoanType:v}))} />
-                  <EditableNumber label="Original Principal" value={selected.OriginalPrincipal} edit={editMode} onChange={(v)=>setEl(s=>({...s,OriginalPrincipal:v}))} />
-                  <EditableNumber label="APR %" value={round2((selected.APR||0)*100)} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,APR:v}))} />
-                  <EditableNumber label="Term (months)" value={selected.TermMonths} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,TermMonths:v}))} />
-                  <Readonly label="Originated" value={fmt(selected.OriginationDate)} />
-                  <EditableDate label="Next Payment" value={toISODate(selected.NextPaymentDate)} edit={editMode} onChange={(v)=>setEl(s=>({...s,NextPaymentDate:v}))} />
-                  <EditableSelect label="Frequency" value={selected.PaymentFrequency} options={admin.frequencies} edit={editMode} onChange={(v)=>setEl(s=>({...s,PaymentFrequency:v}))} />
-                  <EditableNumber label="Escrow (mo)" value={selected.EscrowMonthly} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,EscrowMonthly:v}))} />
-                  <EditableNumber label="Grace Days" value={selected.GraceDays} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,GraceDays:v}))} />
-                  <EditableTextArea label="Notes" value={selected.Notes} edit={editMode} onChange={(v)=>setEl(s=>({...s,Notes:v}))} />
-                </div>
+                <div className="p-4 flex flex-col lg:flex-row gap-4">
+                  <div className="flex-1 lg:w-2/3">
+                    <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+                      <Editable label="Borrower" value={selected.BorrowerName} edit={editMode} onChange={(v)=>setEl(s=>({...s,BorrowerName:v}))} />
+                      <Readonly label="Loan ID" value={selected.LoanID} />
+                      <EditableSelect label="Type" value={selected.LoanType} options={["Mortgage","Revolving LOC","Car Loan","Personal Loan","Credit Card"]} edit={editMode} onChange={(v)=>setEl(s=>({...s,LoanType:v}))} />
+                      <EditableNumber label="Original Principal" value={selected.OriginalPrincipal} edit={editMode} onChange={(v)=>setEl(s=>({...s,OriginalPrincipal:v}))} />
+                      <EditableNumber label="APR %" value={round2((selected.APR||0)*100)} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,APR:v}))} />
+                      <EditableNumber label="Term (months)" value={selected.TermMonths} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,TermMonths:v}))} />
+                      <Readonly label="Originated" value={fmt(selected.OriginationDate)} />
+                      <EditableDate label="Next Payment" value={toISODate(selected.NextPaymentDate)} edit={editMode} onChange={(v)=>setEl(s=>({...s,NextPaymentDate:v}))} />
+                      <EditableSelect label="Frequency" value={selected.PaymentFrequency} options={admin.frequencies} edit={editMode} onChange={(v)=>setEl(s=>({...s,PaymentFrequency:v}))} />
+                      <EditableNumber label="Escrow (mo)" value={selected.EscrowMonthly} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,EscrowMonthly:v}))} />
+                      <EditableNumber label="Grace Days" value={selected.GraceDays} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,GraceDays:v}))} />
+                      <div className="sm:col-span-2">
+                        <EditableTextArea label="Notes" value={selected.Notes} edit={editMode} onChange={(v)=>setEl(s=>({...s,Notes:v}))} />
+                      </div>
+                    </div>
+                  </div>
 
-                {/* Purple stats */}
-                <div className="px-4 pb-4">
-                  <div className="rounded-xl bg-violet-50 border border-violet-100 p-4 grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                    <Stat label="Current Balance (est.)" value={money(balance)} />
-                    <Stat label="Daily Interest (per-diem)" value={`${money(Math.max(0, perDiem))}/day`} />
-                    <Stat label="Estimated Payoff" value={money(payoff)} />
-                    <Stat label="Principal Paid" value={money(principalPaid)} />
-                    <Stat label="Interest Paid" value={money(interestPaid)} />
-                    <Stat label="Total Payments" value={money(totalPayments)} />
-                    <Stat label="Projected Payoff Date" value={payoffDateBase ? fmt(payoffDateBase) : 'â€”'} />
+                  {/* Purple stats */}
+                  <div className="lg:w-1/3 w-full">
+                    <div className="rounded-xl bg-violet-50 border border-violet-100 p-4 grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm">
+                      <Stat label="Current Balance (est.)" value={money(balance)} />
+                      <Stat label="Daily Interest (per-diem)" value={`${money(Math.max(0, perDiem))}/day`} />
+                      <Stat label="Estimated Payoff" value={money(payoff)} />
+                      <Stat label="Principal Paid" value={money(principalPaid)} />
+                      <Stat label="Interest Paid" value={money(interestPaid)} />
+                      <Stat label="Total Payments" value={money(totalPayments)} />
+                      <Stat label="Projected Payoff Date" value={payoffDateBase ? fmt(payoffDateBase) : "-"} />
+                    </div>
                   </div>
                 </div>
               </div>
@@ -1224,8 +1869,8 @@ export default function LoanManagerMock() {
                               money(p.Amount)
                             )}
                           </Td>
-                          <Td>{p.PrincipalPortion == null ? 'â€”' : money(p.PrincipalPortion)}</Td>
-                          <Td>{p.InterestPortion == null ? 'â€”' : money(p.InterestPortion)}</Td>
+                          <Td>{p.PrincipalPortion == null ? '—' : money(p.PrincipalPortion)}</Td>
+                          <Td>{p.InterestPortion == null ? '—' : money(p.InterestPortion)}</Td>
                           <Td>{money(p.EscrowPortion)}</Td>
                           <Td>
                             {editId === p.id ? (
@@ -1299,7 +1944,7 @@ export default function LoanManagerMock() {
                     {isRevolving && (
                       <button onClick={() => setDrawOpen((v)=>!v)} className="rounded-xl border px-4 py-2 text-sm">{drawOpen ? 'Hide Draws' : 'Draws'}</button>
                     )}
-                    <button onClick={postPayment} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Post Payment</button>
+                    <button onClick={() => postPayment()} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold shadow hover:bg-violet-700">Post Payment</button>
                   </div>
 
                   {drawOpen && isRevolving && (
@@ -1325,7 +1970,7 @@ export default function LoanManagerMock() {
                           <ul className="divide-y">
                             {draws.filter(d=>d.LoanRef===selected.id).sort((a,b)=>parseISO(a.DrawDate)-parseISO(b.DrawDate)).map(d => (
                               <li key={d.id} className="py-2 flex items-center justify-between">
-                                <div>{fmt(d.DrawDate)} â€” {money(d.Amount)}</div>
+                                <div>{fmt(d.DrawDate)} — {money(d.Amount)}</div>
                                 <button onClick={()=>deleteDraw(d.id)} className="text-xs rounded-md border px-3 py-1">Remove</button>
                               </li>
                             ))}
@@ -1455,7 +2100,7 @@ export default function LoanManagerMock() {
                             className="w-full flex items-center justify-between px-4 py-2 bg-gray-50 hover:bg-gray-100"
                           >
                             <div className="flex items-center gap-2">
-                              <span className="text-lg">{open ? '–' : '+'}</span>
+                              <span className="text-lg">{open ? '-' : '+'}</span>
                               <span className="font-semibold">{year.year}</span>
                             </div>
                             <div className="flex gap-6 text-sm text-gray-700">
@@ -1489,6 +2134,46 @@ export default function LoanManagerMock() {
         </div>
       </div>
     </div>
+  );
+}
+
+function LoginView({ username, password, onUsernameChange, onPasswordChange, onSubmit, error, busy }) {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-violet-50 to-blue-50 px-4">
+      <div className="w-full max-w-md rounded-2xl bg-white border shadow-lg p-6 space-y-4">
+        <div className="text-center space-y-1">
+          <div className="text-xs uppercase tracking-wide text-gray-500">Loan Manager</div>
+          <div className="text-2xl font-semibold text-gray-800">Sign in</div>
+        </div>
+        {error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2">{error}</div>}
+        <form className="space-y-3" onSubmit={onSubmit}>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">Username</label>
+            <input value={username} onChange={(e)=>onUsernameChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter username" autoComplete="username" />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-600 mb-1">Password</label>
+            <input type="password" value={password} onChange={(e)=>onPasswordChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter password" autoComplete="current-password" />
+          </div>
+          <button type="submit" disabled={busy} className="w-full rounded-xl bg-violet-600 text-white py-2 text-sm font-semibold shadow hover:bg-violet-700 disabled:opacity-60">
+            {busy ? 'Signing in...' : 'Log in'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function GearIcon({ className }) {
+  return (
+    <span
+      className={`inline-flex items-center justify-center leading-none ${className || ''}`}
+      role="img"
+      aria-label="Settings"
+      style={{ fontSize: '20px', lineHeight: 1 }}
+    >
+      ⚙
+    </span>
   );
 }
 
@@ -1587,9 +2272,9 @@ function Th({ children, className }) {
     <th className={`px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide ${className || ''}`}>{children}</th>
   );
 }
-function Td({ children }) {
+function Td({ children, className, ...rest }) {
   return (
-    <td className="px-4 py-2 text-sm">{children}</td>
+    <td className={`px-4 py-2 text-sm ${className || ''}`} {...rest}>{children}</td>
   );
 }
 function FormRow({ label, children }) {
