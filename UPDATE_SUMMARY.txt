@@ -1,0 +1,52 @@
+Loan App Backend + Auth Update Summary
+=====================================
+
+What changed
+------------
+- Added a Node/Express backend with SQLite storage and server-side login.
+- Frontend now uses /api for auth, user management, and shared state.
+- Built frontend is served by the backend in production (no Vite dev server).
+
+Data storage
+------------
+- SQLite DB path: data/loan-app.sqlite (configurable via DB_PATH).
+- The data folder and .sqlite/.db files are in .gitignore and are not committed.
+
+Default login and reset
+-----------------------
+- Default admin: Admin / change-me-please (unless ADMIN_PASSWORD is set).
+- Reset admin password:
+  npm run reset:admin
+- Optional: set RESET_ADMIN_ON_START=true to force-reset on server start.
+
+Common commands
+---------------
+- Dev backend: npm run dev:server
+- Dev frontend: npm run dev
+- Dev both: npm run dev:full
+- Production build: npm run build
+- Production start (serves UI + API): npm start
+
+Ports
+-----
+- Backend default: 4000 (set PORT to change).
+- In production the UI is served from the backend port.
+- For LAN access: http://<LAN-IP>:4000
+
+Env variables (see .env.example)
+--------------------------------
+- ADMIN_USERNAME / ADMIN_PASSWORD
+- JWT_SECRET (set for security)
+- PORT, DB_PATH, TRUST_PROXY
+- VITE_API_BASE (only if hosting frontend separately)
+- RESET_ADMIN_ON_START
+
+Ngrok (public access)
+---------------------
+- With server running on 4000:
+  ngrok http 4000
+- Use the https URL ngrok prints.
+
+Security note
+-------------
+- Set JWT_SECRET and a strong ADMIN_PASSWORD before exposing to the internet.

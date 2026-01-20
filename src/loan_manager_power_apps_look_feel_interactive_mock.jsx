@@ -39,76 +39,30 @@ const addYears = (date, years) => {
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
-const STORAGE_KEY = 'loan-manager-state-v1';
-const DEFAULT_ADMIN_USER = { username: 'Admin', password: '1227', role: 'Admin' };
 const PASSWORD_MIN_LENGTH = 8;
 const USER_ROLES = ['Admin', 'Standard User'];
+const API_BASE = import.meta.env.VITE_API_BASE || '';
 
-function loadPersistedState() {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch (e) {
-    console.warn('Failed to load persisted state', e);
-    return null;
+async function apiRequest(path, { method = 'GET', body } = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    credentials: 'include',
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 204) return null;
+  const contentType = res.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await res.json() : null;
+  if (!res.ok) {
+    const message = data?.error || data?.message || `Request failed (${res.status})`;
+    const err = new Error(message);
+    err.status = res.status;
+    throw err;
   }
-}
-function persistState(data) {
-  if (typeof window === 'undefined') return;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    const existing = raw ? JSON.parse(raw) : {};
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...existing, ...data }));
-  } catch (e) {
-    console.warn('Failed to persist state', e);
-  }
-}
-function bufferToBase64(buffer) {
-  const view = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer || buffer);
-  let binary = '';
-  for (let i = 0; i < view.length; i += 1) {
-    binary += String.fromCharCode(view[i]);
-  }
-  return typeof btoa === 'function' ? btoa(binary) : Buffer.from(binary, 'binary').toString('base64');
-}
-function generateSalt() {
-  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
-  if (cryptoObj?.getRandomValues) {
-    const arr = new Uint8Array(16);
-    cryptoObj.getRandomValues(arr);
-    return bufferToBase64(arr.buffer);
-  }
-  return bufferToBase64(new TextEncoder().encode(String(Math.random())).buffer);
-}
-async function hashPassword(password, salt) {
-  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
-  if (!cryptoObj?.subtle) throw new Error('Secure crypto unavailable in this environment');
-  const data = new TextEncoder().encode(`${password}:${salt}`);
-  const hashBuffer = await cryptoObj.subtle.digest('SHA-256', data);
-  return bufferToBase64(hashBuffer);
-}
-async function hashWithSalt(password, salt) {
-  const s = salt || generateSalt();
-  const passwordHash = await hashPassword(password, s);
-  return { salt: s, passwordHash };
-}
-async function verifyPassword(candidate, user) {
-  if (!user?.salt || !user?.passwordHash) return false;
-  try {
-    const hashed = await hashPassword(candidate, user.salt);
-    return hashed === user.passwordHash;
-  } catch (e) {
-    console.warn('Password verification failed', e);
-    return false;
-  }
+  return data;
 }
 function normalizeUsername(name) {
   return (name || '').trim().replace(/\s+/g, ' ');
-}
-function nextUserId(list) {
-  return Math.max(0, ...list.map((u) => u.id || 0)) + 1;
 }
 function hasAnotherActiveAdmin(list, excludeId = null) {
   const admins = list.filter((u) => u.role === 'Admin' && !u.disabled && u.id !== excludeId);
@@ -577,6 +531,7 @@ export default function LoanManagerMock() {
   const [session, setSession] = React.useState(null);
   const [users, setUsers] = React.useState([]);
   const [authReady, setAuthReady] = React.useState(false);
+  const [dataReady, setDataReady] = React.useState(false);
   const [loginUsername, setLoginUsername] = React.useState('');
   const [loginPassword, setLoginPassword] = React.useState('');
   const [loginError, setLoginError] = React.useState('');
@@ -660,96 +615,108 @@ export default function LoanManagerMock() {
   const [mode, setMode] = React.useState('details'); // 'details' | 'calc'
   const [adminOpen, setAdminOpen] = React.useState(false);
 
-  // Recalc all on mount to normalize any sample rows
-  React.useEffect(() => {
-    const saved = loadPersistedState();
-    if (saved && !hydrated.current) {
-      setLoans(saved.loans || initialLoans);
-      setPayments(saved.payments || initialPayments);
-      setDraws(saved.draws || []);
-      if (saved.selectedId) setSelectedId(saved.selectedId);
-      if (saved.admin) {
+  function handleAuthFailure(err) {
+    if (err?.status === 401) {
+      setSession(null);
+      setUsers([]);
+      setDataReady(false);
+      hydrated.current = false;
+      setAdminOpen(false);
+      setSettingsOpen(false);
+    }
+  }
+
+  async function loadStateFromServer() {
+    hydrated.current = false;
+    try {
+      const res = await apiRequest('/api/state');
+      const state = res?.state || {};
+      const nextLoans = Array.isArray(state.loans) ? state.loans : initialLoans;
+      const nextPayments = Array.isArray(state.payments) ? state.payments : initialPayments;
+      const nextDraws = Array.isArray(state.draws) ? state.draws : [];
+      setLoans(nextLoans);
+      setPayments(nextPayments);
+      setDraws(nextDraws);
+      const nextSelected = state.selectedId ?? nextLoans[0]?.id ?? null;
+      setSelectedId(nextSelected);
+      if (state.admin) {
         setAdmin((prev) => ({
           ...prev,
-          ...saved.admin,
-          frequencies: Array.isArray(saved.admin.frequencies) ? saved.admin.frequencies : prev.frequencies,
+          ...state.admin,
+          frequencies: Array.isArray(state.admin.frequencies) ? state.admin.frequencies : prev.frequencies,
         }));
       }
+    } catch (err) {
+      console.warn('Failed to load state from server', err);
+      handleAuthFailure(err);
+    } finally {
       hydrated.current = true;
-    } else {
-      // initial normalize
-      setPayments((prev) => recalcAllLoans(loans, prev, draws));
-      hydrated.current = true;
+      setDataReady(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }
 
-  React.useEffect(() => {
-    if (!hydrated.current) return;
-    persistState({ loans, payments, draws, selectedId, admin });
-  }, [loans, payments, draws, selectedId, admin]);
+  async function refreshUsers() {
+    try {
+      const res = await apiRequest('/api/users');
+      setUsers(Array.isArray(res?.users) ? res.users : []);
+    } catch (err) {
+      console.warn('Failed to load users', err);
+      handleAuthFailure(err);
+    }
+  }
+
+  async function persistStateToServer(nextState) {
+    try {
+      await apiRequest('/api/state', { method: 'PUT', body: nextState });
+    } catch (err) {
+      console.warn('Failed to save state', err);
+      handleAuthFailure(err);
+    }
+  }
 
   // Auth bootstrap
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => {
     let cancelled = false;
     async function initAuth() {
-      const saved = loadPersistedState() || {};
-      let nextUsers = Array.isArray(saved.users) ? saved.users : [];
-      const hasDefaultAdmin = nextUsers.some((u) => (u.username || '').toLowerCase() === DEFAULT_ADMIN_USER.username.toLowerCase());
-      if (!hasDefaultAdmin) {
-        try {
-          const creds = await hashWithSalt(DEFAULT_ADMIN_USER.password);
-          const adminUser = {
-            id: nextUserId(nextUsers),
-            username: DEFAULT_ADMIN_USER.username,
-            role: DEFAULT_ADMIN_USER.role,
-            ...creds,
-            disabled: false,
-            createdAt: new Date().toISOString(),
-          };
-          nextUsers = [...nextUsers, adminUser];
-        } catch (e) {
-          console.warn('Unable to seed default admin user', e);
+      try {
+        const res = await apiRequest('/api/auth/me');
+        if (cancelled) return;
+        setSession(res.user);
+        setAuthReady(true);
+        await loadStateFromServer();
+        if (res.user?.role === 'Admin') {
+          await refreshUsers();
         }
+      } catch (err) {
+        if (cancelled) return;
+        setSession(null);
+        setUsers([]);
+        setAuthReady(true);
+        setDataReady(false);
+        hydrated.current = false;
       }
-      if (cancelled) return;
-      const storedSession = saved.session;
-      let restoredSession = null;
-      if (storedSession) {
-        const live = nextUsers.find((u) => u.username === storedSession.username);
-        if (live && !live.disabled) {
-          restoredSession = { username: live.username, role: live.role };
-        }
-      }
-      setUsers(nextUsers);
-      setSession(restoredSession);
-      setAuthReady(true);
-      persistState({ users: nextUsers, session: restoredSession });
     }
     initAuth();
     return () => { cancelled = true; };
   }, []);
 
-  // Persist auth changes
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => {
-    if (!authReady) return;
-    persistState({ users, session });
-  }, [users, session, authReady]);
+    if (!session || !dataReady || !hydrated.current) return;
+    persistStateToServer({ loans, payments, draws, selectedId, admin });
+  }, [loans, payments, draws, selectedId, admin, session, dataReady]);
 
-  // Keep session in sync with latest user shape or disable if revoked
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   React.useEffect(() => {
-    if (!authReady || !session) return;
-    const live = users.find((u) => u.username === session.username);
-    if (!live || live.disabled) {
-      setSession(null);
-      setAdminOpen(false);
-      setSettingsOpen(false);
+    if (!session) {
+      setUsers([]);
       return;
     }
-    if (live.role !== session.role || live.username !== session.username) {
-      setSession({ username: live.username, role: live.role });
+    if (session.role === 'Admin') {
+      refreshUsers();
     }
-  }, [users, session, authReady]);
+  }, [session]);
 
   React.useEffect(() => {
     if (!isAdmin && adminOpen) setAdminOpen(false);
@@ -768,29 +735,40 @@ export default function LoanManagerMock() {
     const username = normalizeUsername(loginUsername);
     const password = loginPassword;
     if (!username || !password) { setLoginError('Username and password are required.'); return; }
-    const user = users.find((u) => (u.username || '').toLowerCase() === username.toLowerCase());
-    if (!user) { setLoginError('Incorrect username or password.'); return; }
-    if (user.disabled) { setLoginError('This account is disabled.'); return; }
     setLoginBusy(true);
     try {
-      const ok = await verifyPassword(password, user);
-      if (!ok) {
-        setLoginError('Incorrect username or password.');
+      const res = await apiRequest('/api/auth/login', {
+        method: 'POST',
+        body: { username, password },
+      });
+      setSession(res.user);
+      setLoginPassword('');
+      setLoginError('');
+      setDataReady(false);
+      await loadStateFromServer();
+      if (res.user?.role === 'Admin') {
+        await refreshUsers();
       } else {
-        setSession({ username: user.username, role: user.role });
-        setLoginPassword('');
-        setLoginError('');
+        setUsers([]);
       }
     } catch (err) {
-      setLoginError('Unable to sign in right now.');
+      setLoginError(err.message || 'Unable to sign in right now.');
       console.warn(err);
     } finally {
       setLoginBusy(false);
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    try {
+      await apiRequest('/api/auth/logout', { method: 'POST' });
+    } catch (err) {
+      console.warn('Logout failed', err);
+    }
     setSession(null);
+    setUsers([]);
+    setDataReady(false);
+    hydrated.current = false;
     setAdminOpen(false);
     setSettingsOpen(false);
     setLoginError('');
@@ -810,21 +788,19 @@ export default function LoanManagerMock() {
     if (!current || !next || !nextConfirm) { setSettingsError('All password fields are required.'); return; }
     if (next !== nextConfirm) { setSettingsError('New passwords do not match.'); return; }
     if (next.length < PASSWORD_MIN_LENGTH) { setSettingsError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
-    const user = users.find((u) => u.username === session.username);
-    if (!user) { setSettingsError('Session expired.'); setSession(null); return; }
-    const ok = await verifyPassword(current, user);
-    if (!ok) { setSettingsError('Current password is incorrect.'); return; }
-    if (current === next) { setSettingsError('Choose a password different from the current one.'); return; }
     try {
-      const creds = await hashWithSalt(next);
-      setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, ...creds } : u)));
+      await apiRequest('/api/users/me/password', {
+        method: 'PUT',
+        body: { currentPassword: current, newPassword: next },
+      });
       setSettingsSuccess('Password updated successfully.');
       setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
     } catch (e) {
       console.warn('Password update failed', e);
-      setSettingsError('Could not update password securely.');
+      setSettingsError(e.message || 'Could not update password securely.');
+      handleAuthFailure(e);
     }
   }
 
@@ -855,24 +831,19 @@ export default function LoanManagerMock() {
       if (userForm.password.length < PASSWORD_MIN_LENGTH) { setUserFormError(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
       const exists = users.some((u) => (u.username || '').toLowerCase() === username.toLowerCase());
       if (exists) { setUserFormError('Username already exists.'); return; }
-      let creds;
       try {
-        creds = await hashWithSalt(userForm.password);
+        await apiRequest('/api/users', {
+          method: 'POST',
+          body: { username, password: userForm.password, role },
+        });
+        setUserMgmtMessage('User created.');
+        resetUserFormState();
+        await refreshUsers();
       } catch (e) {
-        console.warn('Hashing failed', e);
-        setUserFormError('Could not secure password.'); return;
+        console.warn('User create failed', e);
+        setUserFormError(e.message || 'Could not create user.');
+        handleAuthFailure(e);
       }
-      const newUser = {
-        id: nextUserId(users),
-        username,
-        role,
-        ...creds,
-        disabled: false,
-        createdAt: new Date().toISOString(),
-      };
-      setUsers((prev) => [...prev, newUser]);
-      setUserMgmtMessage('User created.');
-      resetUserFormState();
     } else {
       const existing = users.find((u) => u.id === userEditId);
       if (!existing) { setUserFormError('User not found.'); return; }
@@ -881,22 +852,41 @@ export default function LoanManagerMock() {
       if (existing.role === 'Admin' && role !== 'Admin' && !hasAnotherActiveAdmin(users, existing.id)) {
         setUserFormError('At least one admin must remain.'); return;
       }
-      const updated = { ...existing, username, role };
-      setUsers((prev) => prev.map((u) => (u.id === userEditId ? updated : u)));
-      if (session?.username === existing.username) setSession({ username, role });
-      setUserMgmtMessage('User updated.');
-      resetUserFormState();
+      try {
+        const res = await apiRequest(`/api/users/${userEditId}`, {
+          method: 'PUT',
+          body: { username, role },
+        });
+        if (session?.id === res?.user?.id) setSession(res.user);
+        setUserMgmtMessage('User updated.');
+        resetUserFormState();
+        await refreshUsers();
+      } catch (e) {
+        console.warn('User update failed', e);
+        setUserFormError(e.message || 'Could not update user.');
+        handleAuthFailure(e);
+      }
     }
   }
-  function toggleUserDisabled(user) {
+  async function toggleUserDisabled(user) {
     if (!isAdmin) return;
     const disabling = !user.disabled;
     if (disabling && user.role === 'Admin' && !hasAnotherActiveAdmin(users, user.id)) {
       setUserMgmtMessage('Keep at least one admin active.'); return;
     }
-    setUsers((prev) => prev.map((u) => (u.id === user.id ? { ...u, disabled: !u.disabled } : u)));
-    if (disabling && session?.username === user.username) {
-      handleLogout();
+    try {
+      await apiRequest(`/api/users/${user.id}`, {
+        method: 'PUT',
+        body: { disabled: disabling },
+      });
+      await refreshUsers();
+      if (disabling && session?.id === user.id) {
+        handleLogout();
+      }
+    } catch (e) {
+      console.warn('User toggle failed', e);
+      setUserMgmtMessage(e.message || 'Unable to update user.');
+      handleAuthFailure(e);
     }
   }
   async function resetPasswordForUser(userId) {
@@ -907,18 +897,20 @@ export default function LoanManagerMock() {
     if (resetPassword.length < PASSWORD_MIN_LENGTH) { setUserMgmtMessage(`Password must be at least ${PASSWORD_MIN_LENGTH} characters.`); return; }
     const target = users.find((u) => u.id === userId);
     if (!target) { setUserMgmtMessage('User not found.'); return; }
-    let creds;
     try {
-      creds = await hashWithSalt(resetPassword);
+      await apiRequest(`/api/users/${userId}/password`, {
+        method: 'PUT',
+        body: { password: resetPassword },
+      });
+      setUserMgmtMessage(`Password reset for ${target.username}.`);
+      setResetUserId(null);
+      setResetPassword('');
+      setResetConfirm('');
     } catch (e) {
       console.warn('Reset failed', e);
-      setUserMgmtMessage('Could not secure password.'); return;
+      setUserMgmtMessage(e.message || 'Could not reset password.');
+      handleAuthFailure(e);
     }
-    setUsers((prev) => prev.map((u) => (u.id === userId ? { ...u, ...creds } : u)));
-    setUserMgmtMessage(`Password reset for ${target.username}.`);
-    setResetUserId(null);
-    setResetPassword('');
-    setResetConfirm('');
   }
   function startReset(user) {
     setResetUserId(user.id);
@@ -926,14 +918,21 @@ export default function LoanManagerMock() {
     setResetConfirm('');
     setUserMgmtMessage('');
   }
-  function deleteUser(user) {
+  async function deleteUser(user) {
     if (!isAdmin) return;
     if (user.role === 'Admin' && !hasAnotherActiveAdmin(users, user.id)) {
       setUserFormError('Cannot delete the last admin.'); return;
     }
     if (!window.confirm(`Delete user "${user.username}"? This cannot be undone.`)) return;
-    setUsers((prev) => prev.filter((u) => u.id !== user.id));
-    if (session?.username === user.username) handleLogout();
+    try {
+      await apiRequest(`/api/users/${user.id}`, { method: 'DELETE' });
+      await refreshUsers();
+      if (session?.id === user.id) handleLogout();
+    } catch (e) {
+      console.warn('Delete user failed', e);
+      setUserFormError(e.message || 'Could not delete user.');
+      handleAuthFailure(e);
+    }
   }
 
   const selected = loans.find((l) => l.id === selectedId);
@@ -1379,6 +1378,13 @@ export default function LoanManagerMock() {
         error={loginError}
         busy={loginBusy}
       />
+    );
+  }
+  if (!dataReady) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
+        <div className="rounded-xl bg-white shadow-lg border px-6 py-4 text-sm">Loading data...</div>
+      </div>
     );
   }
   return (
