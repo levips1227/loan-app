@@ -37,6 +37,39 @@ body {
   width: 100%;
 }
 
+.report-print-area {
+  display: none;
+}
+
+@media print {
+  @page {
+    margin: 12mm;
+  }
+  body {
+    background: #ffffff;
+  }
+  body * {
+    visibility: hidden;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .report-print-area,
+  .report-print-area * {
+    visibility: visible;
+  }
+  .report-print-area {
+    display: block;
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+  .report-page-break {
+    page-break-after: always;
+  }
+}
+
 h1 {
   font-size: 3.2em;
   line-height: 1.1;
@@ -61,4 +94,3 @@ button:focus,
 button:focus-visible {
   outline: 4px auto -webkit-focus-ring-color;
 }
-

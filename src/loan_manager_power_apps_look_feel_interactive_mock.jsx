@@ -39,6 +39,7 @@ const addYears = (date, years) => {
 
 const FREQ = { Monthly: 12, Biweekly: 26, Weekly: 52, Quarterly: 4, Annual: 1 };
 const EXTRA_FREQ = { day: 365, week: 52, month: 12, year: 1 };
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const PASSWORD_MIN_LENGTH = 8;
 const USER_ROLES = ['Admin', 'Standard User'];
 const API_BASE = import.meta.env.VITE_API_BASE || '';
@@ -80,6 +81,23 @@ function nextByFreq(dt, freq) {
   }
 }
 function periodsPerYear(freq) { return FREQ[freq] || 12; }
+
+function listDueDates(loan, endDate) {
+  if (!loan) return [];
+  const end = parseISO(endDate);
+  if (Number.isNaN(end.getTime())) return [];
+  const freq = loan.PaymentFrequency || 'Monthly';
+  let due = loan.NextPaymentDate
+    ? parseISO(loan.NextPaymentDate)
+    : addMonths(parseISO(loan.OriginationDate), 1);
+  if (Number.isNaN(due.getTime())) return [];
+  const dates = [];
+  for (let i = 0; i < 2400 && due <= end; i += 1) {
+    dates.push(new Date(due.getTime()));
+    due = nextByFreq(due, freq);
+  }
+  return dates;
+}
 
 function calcPerDiem(apr, balance) { return (apr ?? 0) / 365 * (balance ?? 0); }
 function calcPayoff(balance, apr, daysSince) { return Math.max(0, round2(balance + calcPerDiem(apr, balance) * Math.max(0, daysSince))); }
@@ -592,10 +610,114 @@ export default function LoanManagerMock() {
 
   // --- Sample data ---
   const initialLoans = [
-    { id: 1, LoanID: 'LN-0001', BorrowerName: 'Test Borrower', LoanType: 'Mortgage', OriginalPrincipal: 100000, OriginationDate: '2024-01-15', TermMonths: 360, APR: 0.065, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-02-15', EscrowMonthly: 300, LateFeeFlat: 0, LateFeePct: 0.04, GraceDays: 5, Status: 'Active', Notes: 'Sample row (delete later)' },
-    { id: 2, LoanID: 'LN-0020', BorrowerName: 'James Garcia', LoanType: 'Mortgage', OriginalPrincipal: 250000, OriginationDate: '2023-06-01', TermMonths: 180, APR: 0.059, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-15', EscrowMonthly: 450, LateFeeFlat: 25, LateFeePct: 0.03, GraceDays: 7, Status: 'Active', Notes: 'Conventional' },
-    { id: 3, LoanID: 'LN-0042', BorrowerName: 'Avery Chen', LoanType: 'Revolving LOC', OriginalPrincipal: 150000, OriginationDate: '2022-11-10', TermMonths: 120, APR: 0.072, PaymentFrequency: 'Monthly', NextPaymentDate: '2024-09-20', EscrowMonthly: 0, LateFeeFlat: 35, LateFeePct: 0.02, GraceDays: 5, Status: 'Active', Notes: 'Open draw period' },
-    { id: 4, LoanID: 'LN-0100', BorrowerName: 'LS', LoanType: 'Mortgage', OriginalPrincipal: 332000, OriginationDate: '2025-09-03', TermMonths: 360, APR: 0.065, PaymentFrequency: 'Monthly', NextPaymentDate: '2025-10-03', EscrowMonthly: 0, LateFeeFlat: 0, LateFeePct: 0.04, GraceDays: 15, Status: 'Active', Notes: 'Fixed payment', FixedPayment: true },
+    {
+      id: 1,
+      LoanID: 'LN-0001',
+      BorrowerName: 'Test Borrower',
+      LoanType: 'Mortgage',
+      OriginalPrincipal: 100000,
+      OriginationDate: '2024-01-15',
+      TermMonths: 360,
+      APR: 0.065,
+      PaymentFrequency: 'Monthly',
+      NextPaymentDate: '2024-02-15',
+      EscrowMonthly: 300,
+      LateFeeFlat: 0,
+      LateFeePct: 0.04,
+      GraceDays: 5,
+      Status: 'Active',
+      Notes: 'Sample row (delete later)',
+      FixedPayment: true,
+      AccountNumber: '',
+      BorrowerAddress: '',
+      PropertyAddress: '',
+      ServicerName: '',
+      ServicerAddress: '',
+      ServicerPhone: '',
+      ServicerWebsite: '',
+      StatementMessage: '',
+    },
+    {
+      id: 2,
+      LoanID: 'LN-0020',
+      BorrowerName: 'James Garcia',
+      LoanType: 'Mortgage',
+      OriginalPrincipal: 250000,
+      OriginationDate: '2023-06-01',
+      TermMonths: 180,
+      APR: 0.059,
+      PaymentFrequency: 'Monthly',
+      NextPaymentDate: '2024-09-15',
+      EscrowMonthly: 450,
+      LateFeeFlat: 25,
+      LateFeePct: 0.03,
+      GraceDays: 7,
+      Status: 'Active',
+      Notes: 'Conventional',
+      FixedPayment: true,
+      AccountNumber: '',
+      BorrowerAddress: '',
+      PropertyAddress: '',
+      ServicerName: '',
+      ServicerAddress: '',
+      ServicerPhone: '',
+      ServicerWebsite: '',
+      StatementMessage: '',
+    },
+    {
+      id: 3,
+      LoanID: 'LN-0042',
+      BorrowerName: 'Avery Chen',
+      LoanType: 'Revolving LOC',
+      OriginalPrincipal: 150000,
+      OriginationDate: '2022-11-10',
+      TermMonths: 120,
+      APR: 0.072,
+      PaymentFrequency: 'Monthly',
+      NextPaymentDate: '2024-09-20',
+      EscrowMonthly: 0,
+      LateFeeFlat: 35,
+      LateFeePct: 0.02,
+      GraceDays: 5,
+      Status: 'Active',
+      Notes: 'Open draw period',
+      FixedPayment: false,
+      AccountNumber: '',
+      BorrowerAddress: '',
+      PropertyAddress: '',
+      ServicerName: '',
+      ServicerAddress: '',
+      ServicerPhone: '',
+      ServicerWebsite: '',
+      StatementMessage: '',
+    },
+    {
+      id: 4,
+      LoanID: 'LN-0100',
+      BorrowerName: 'LS',
+      LoanType: 'Mortgage',
+      OriginalPrincipal: 332000,
+      OriginationDate: '2025-09-03',
+      TermMonths: 360,
+      APR: 0.065,
+      PaymentFrequency: 'Monthly',
+      NextPaymentDate: '2025-10-03',
+      EscrowMonthly: 0,
+      LateFeeFlat: 0,
+      LateFeePct: 0.04,
+      GraceDays: 15,
+      Status: 'Active',
+      Notes: 'Fixed payment',
+      FixedPayment: true,
+      AccountNumber: '',
+      BorrowerAddress: '',
+      PropertyAddress: '',
+      ServicerName: '',
+      ServicerAddress: '',
+      ServicerPhone: '',
+      ServicerWebsite: '',
+      StatementMessage: '',
+    },
   ];
 
   const initialPayments = [
@@ -612,7 +734,9 @@ export default function LoanManagerMock() {
   const [query, setQuery] = React.useState('');
   const [selectedId, setSelectedId] = React.useState(loans[0].id);
   const [loanMenuId, setLoanMenuId] = React.useState(null);
-  const [mode, setMode] = React.useState('details'); // 'details' | 'calc'
+  const [mode, setMode] = React.useState('details'); // 'details' | 'calc' | 'reports'
+  const [reportMonth, setReportMonth] = React.useState(() => toISODate(new Date()).slice(0, 7));
+  const [reportSelections, setReportSelections] = React.useState({ statement: true });
   const [adminOpen, setAdminOpen] = React.useState(false);
 
   function handleAuthFailure(err) {
@@ -1021,6 +1145,14 @@ export default function LoanManagerMock() {
   const [nlNextDue, setNlNextDue] = React.useState(toISODate(new Date()));
   const [nlCreditLimit, setNlCreditLimit] = React.useState('');
   const [nlFixedPayment, setNlFixedPayment] = React.useState(true);
+  const [nlAccountNumber, setNlAccountNumber] = React.useState('');
+  const [nlBorrowerAddress, setNlBorrowerAddress] = React.useState('');
+  const [nlPropertyAddress, setNlPropertyAddress] = React.useState('');
+  const [nlServicerName, setNlServicerName] = React.useState('');
+  const [nlServicerAddress, setNlServicerAddress] = React.useState('');
+  const [nlServicerPhone, setNlServicerPhone] = React.useState('');
+  const [nlServicerWebsite, setNlServicerWebsite] = React.useState('');
+  const [nlStatementMessage, setNlStatementMessage] = React.useState('');
 
   const nlPpy = periodsPerYear(nlFreq);
   const estNewPI = (() => {
@@ -1079,10 +1211,19 @@ export default function LoanManagerMock() {
       Notes: nlType === 'Revolving LOC' && nlCreditLimit ? `Credit limit: ${nlCreditLimit}` : '',
       CreditLimit: nlType === 'Revolving LOC' ? Number(nlCreditLimit) || 0 : undefined,
       FixedPayment: nlFixedPayment,
+      AccountNumber: nlAccountNumber,
+      BorrowerAddress: nlBorrowerAddress,
+      PropertyAddress: nlPropertyAddress,
+      ServicerName: nlServicerName,
+      ServicerAddress: nlServicerAddress,
+      ServicerPhone: nlServicerPhone,
+      ServicerWebsite: nlServicerWebsite,
+      StatementMessage: nlStatementMessage,
     };
     setLoans((prev) => [...prev, newLoan]);
     setSelectedId(key.id);
     setNlBorrower(''); setNlPrincipal(''); setNlAPR(''); setNlTerm('360'); setNlType('Mortgage'); setNlStart(toISODate(new Date())); setNlFreq(admin.frequencies[0] || 'Monthly'); setNlEscrow('0'); setNlGrace(String(admin.graceDaysDefault)); setNlNextDue(toISODate(new Date())); setNlCreditLimit('');
+    setNlAccountNumber(''); setNlBorrowerAddress(''); setNlPropertyAddress(''); setNlServicerName(''); setNlServicerAddress(''); setNlServicerPhone(''); setNlServicerWebsite(''); setNlStatementMessage('');
     setNlOpen(false);
   }
 
@@ -1090,6 +1231,7 @@ export default function LoanManagerMock() {
   // Inline Edit Loan Details (unlock fields)
   // =============================
   const [editMode, setEditMode] = React.useState(false);
+  const [statementDetailsOpen, setStatementDetailsOpen] = React.useState(false);
   const [el, setEl] = React.useState({}); // holds editable fields as strings
   function startEdit() {
     setEl({
@@ -1103,7 +1245,16 @@ export default function LoanManagerMock() {
       EscrowMonthly: String(selected.EscrowMonthly ?? ''),
       GraceDays: String(selected.GraceDays ?? ''),
       Notes: selected.Notes || '',
+      AccountNumber: selected.AccountNumber || '',
+      BorrowerAddress: selected.BorrowerAddress || '',
+      PropertyAddress: selected.PropertyAddress || '',
+      ServicerName: selected.ServicerName || '',
+      ServicerAddress: selected.ServicerAddress || '',
+      ServicerPhone: selected.ServicerPhone || '',
+      ServicerWebsite: selected.ServicerWebsite || '',
+      StatementMessage: selected.StatementMessage || '',
     });
+    setStatementDetailsOpen(true);
     setEditMode(true);
   }
   function cancelEdit() { setEditMode(false); }
@@ -1124,6 +1275,14 @@ export default function LoanManagerMock() {
       EscrowMonthly: Number(el.EscrowMonthly) || 0,
       GraceDays: Number(el.GraceDays) || 0,
       Notes: el.Notes,
+      AccountNumber: el.AccountNumber || '',
+      BorrowerAddress: el.BorrowerAddress || '',
+      PropertyAddress: el.PropertyAddress || '',
+      ServicerName: el.ServicerName || '',
+      ServicerAddress: el.ServicerAddress || '',
+      ServicerPhone: el.ServicerPhone || '',
+      ServicerWebsite: el.ServicerWebsite || '',
+      StatementMessage: el.StatementMessage || '',
     };
     setLoans((prev) => prev.map((l) => (l.id === selected.id ? updated : l)));
     setPayments((prev) => recalcLoanPayments(updated, prev, draws));
@@ -1360,6 +1519,222 @@ export default function LoanManagerMock() {
   const lifetimeSavingsTotal = round2(lifetimeSavingsSoFar + interestSavedVsCurrent);
   const lifetimeSavingsLabel = Math.abs(lifetimeSavingsTotal) > EPS ? money(lifetimeSavingsTotal) : 'N/A';
 
+  const reportData = React.useMemo(() => {
+    if (!selected || !reportMonth) return null;
+    const parts = reportMonth.split('-').map(Number);
+    if (parts.length < 2) return null;
+    const year = parts[0];
+    const monthIndex = parts[1] - 1;
+    if (!Number.isFinite(year) || monthIndex < 0 || monthIndex > 11) return null;
+
+    const monthStart = new Date(Date.UTC(year, monthIndex, 1));
+    const monthEnd = addDays(addMonths(monthStart, 1), -1);
+    const yearStart = new Date(Date.UTC(year, 0, 1));
+    const statementLabel = new Date(Date.UTC(year, monthIndex, 1)).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+
+    const getTime = (value) => parseISO(value).getTime();
+    const isOnOrBefore = (value, end) => {
+      const t = getTime(value);
+      return Number.isFinite(t) && t <= end.getTime();
+    };
+    const isBetween = (value, start, end) => {
+      const t = getTime(value);
+      return Number.isFinite(t) && t >= start.getTime() && t <= end.getTime();
+    };
+
+    const paymentsForLoan = loanPaymentsAsc || [];
+    const drawsForLoan = draws.filter((d) => d.LoanRef === selected.id);
+
+    const dueDatesThroughMonth = listDueDates(selected, monthEnd);
+    const dueDatesInMonth = dueDatesThroughMonth.filter((d) => d >= monthStart && d <= monthEnd);
+    const dueCountInMonth = dueDatesInMonth.length;
+
+    let dueDate = dueDatesInMonth.length ? dueDatesInMonth[dueDatesInMonth.length - 1] : null;
+    if (!dueDate && selected.NextPaymentDate) {
+      const parsed = parseISO(selected.NextPaymentDate);
+      if (!Number.isNaN(parsed.getTime())) dueDate = parsed;
+    }
+    const statementDate = dueDate ? addDays(dueDate, -15) : null;
+    const statementDateLabel = statementDate ? toISODate(statementDate) : '-';
+    const dueDateLabel = dueDate ? toISODate(dueDate) : '-';
+
+    const activityPeriodStart = statementDate ? addMonths(statementDate, -1) : monthStart;
+    const activityPeriodEnd = statementDate ? addDays(statementDate, -1) : monthEnd;
+    const asOfDate = statementDate || monthEnd;
+
+    const paymentsToDate = paymentsForLoan.filter((p) => isOnOrBefore(p.PaymentDate, asOfDate));
+    const paymentsInPeriod = paymentsToDate.filter((p) => isBetween(p.PaymentDate, activityPeriodStart, activityPeriodEnd));
+    const paymentsBeforePeriod = paymentsToDate.filter((p) => getTime(p.PaymentDate) < activityPeriodStart.getTime());
+    const paymentsInYear = paymentsToDate.filter((p) => getTime(p.PaymentDate) >= yearStart.getTime());
+    const paymentsBeforeYear = paymentsToDate.filter((p) => getTime(p.PaymentDate) < yearStart.getTime());
+
+    const drawsToDate = drawsForLoan.filter((d) => isOnOrBefore(d.DrawDate, asOfDate));
+    const drawsBeforePeriod = drawsToDate.filter((d) => getTime(d.DrawDate) < activityPeriodStart.getTime());
+    const drawsInPeriod = drawsToDate.filter((d) => isBetween(d.DrawDate, activityPeriodStart, activityPeriodEnd));
+
+    const sumPayments = (list) => list.reduce((acc, p) => {
+      acc.total += Number(p.Amount) || 0;
+      acc.principal += Number(p.PrincipalPortion) || 0;
+      acc.interest += Number(p.InterestPortion) || 0;
+      acc.escrow += Number(p.EscrowPortion) || 0;
+      return acc;
+    }, { total: 0, principal: 0, interest: 0, escrow: 0 });
+
+    const sumDraws = (list) => list.reduce((acc, d) => acc + (Number(d.Amount) || 0), 0);
+
+    const totalsToEnd = sumPayments(paymentsToDate);
+    const totalsInMonth = sumPayments(paymentsInPeriod);
+    const totalsInYear = sumPayments(paymentsInYear);
+    const totalsBeforeYear = sumPayments(paymentsBeforeYear);
+
+    const principalPaidToDate = round2(totalsToEnd.principal);
+    const balanceEnd = round2((selected.OriginalPrincipal ?? 0) - principalPaidToDate + sumDraws(drawsToDate));
+
+    const principalPaidBeforePeriod = round2(sumPayments(paymentsBeforePeriod).principal);
+    const balanceStart = round2((selected.OriginalPrincipal ?? 0) - principalPaidBeforePeriod + sumDraws(drawsBeforePeriod));
+
+    const ppy = periodsPerYear(selected.PaymentFrequency || 'Monthly');
+    const escrowPerPeriod = round2(((selected.EscrowMonthly || 0) * 12) / ppy);
+    const scheduledTotal = round2(scheduledPaymentFor(selected, balanceEnd));
+    const scheduledInterest = round2(((selected.APR ?? 0) / ppy) * balanceEnd);
+    const scheduledPrincipal = Math.max(0, round2(scheduledTotal - scheduledInterest - escrowPerPeriod));
+
+    const statementCutoff = asOfDate;
+    const dueDatesBeforeStatement = listDueDates(selected, statementCutoff)
+      .filter((d) => d < statementCutoff);
+    const scheduledPaymentsBeforeStatement = paymentsForLoan
+      .filter((p) => p.IsScheduledInstallment !== false)
+      .filter((p) => isOnOrBefore(p.PaymentDate, statementCutoff)).length;
+    const overdueCount = Math.max(0, dueDatesBeforeStatement.length - scheduledPaymentsBeforeStatement);
+
+    const dueThisMonth = round2(scheduledTotal * dueCountInMonth);
+    const overdueAmount = round2(scheduledTotal * overdueCount);
+    const totalDue = round2(dueThisMonth + overdueAmount);
+    const dueDatesLabel = dueDatesInMonth.length ? dueDatesInMonth.map((d) => toISODate(d)).join(', ') : 'None';
+
+    const statusLabel = overdueCount > 0 ? `Past Due (${overdueCount})` : (selected.Status || 'Active');
+
+    const ppyForTerm = periodsPerYear(selected.PaymentFrequency || 'Monthly');
+    const termMonths = Number(selected.TermMonths) || 0;
+    const termPeriods = Math.round((termMonths * ppyForTerm) / 12);
+    const firstPaymentDate = selected.NextPaymentDate
+      ? parseISO(selected.NextPaymentDate)
+      : addMonths(parseISO(selected.OriginationDate), 1);
+    let maturityDate = '';
+    if (Number.isFinite(firstPaymentDate.getTime()) && termPeriods > 0) {
+      let lastPayment = new Date(firstPaymentDate.getTime());
+      for (let i = 1; i < termPeriods; i += 1) {
+        lastPayment = nextByFreq(lastPayment, selected.PaymentFrequency || 'Monthly');
+      }
+      maturityDate = toISODate(lastPayment);
+    }
+    const payoffDateAsOf = computePayoffDate(selected, balanceEnd, firstPaymentDate, paymentsToDate);
+    const payoffDateLabel = payoffDateAsOf || '-';
+
+    const originationInPeriod = selected.OriginationDate
+      && isBetween(selected.OriginationDate, activityPeriodStart, activityPeriodEnd);
+
+    const transactions = [
+      ...(originationInPeriod ? [{
+        key: `origination-${selected.id}`,
+        date: selected.OriginationDate,
+        description: 'Loan Disbursement',
+        charge: Number(selected.OriginalPrincipal) || 0,
+        payment: 0,
+      }] : []),
+      ...paymentsInPeriod.map((p) => {
+        const method = p.Method || 'Payment';
+        const ref = p.Reference ? ` - ${p.Reference}` : '';
+        return {
+          key: `p-${p.id}`,
+          date: p.PaymentDate,
+          description: `Payment (${method})${ref}`,
+          charge: 0,
+          payment: Number(p.Amount) || 0,
+        };
+      }),
+      ...drawsInPeriod.map((d) => ({
+        key: `d-${d.id}`,
+        date: d.DrawDate,
+        description: 'Draw',
+        charge: Number(d.Amount) || 0,
+        payment: 0,
+      })),
+    ].sort((a, b) => getTime(a.date) - getTime(b.date));
+
+    const accountNumber = selected.AccountNumber || selected.LoanID || '';
+    const servicerName = selected.ServicerName || 'Loan Manager Servicing';
+    const servicerAddress = selected.ServicerAddress || '';
+    const servicerPhone = selected.ServicerPhone || '';
+    const servicerWebsite = selected.ServicerWebsite || '';
+    const borrowerAddress = selected.BorrowerAddress || '';
+    const propertyAddress = selected.PropertyAddress || '';
+    const statementMessage = selected.StatementMessage || 'If you have questions about this statement, please contact your loan servicer.';
+
+    const yearMonths = [];
+    for (let m = 0; m <= monthIndex; m += 1) {
+      const mStart = new Date(Date.UTC(year, m, 1));
+      const mEnd = addDays(addMonths(mStart, 1), -1);
+      const monthPayments = paymentsToDate.filter((p) => isBetween(p.PaymentDate, mStart, mEnd));
+      const totals = sumPayments(monthPayments);
+      yearMonths.push({
+        key: `${year}-${String(m + 1).padStart(2, '0')}`,
+        label: MONTH_LABELS[m],
+        totals,
+      });
+    }
+
+    return {
+      year,
+      monthIndex,
+      statementLabel,
+      periodStart: activityPeriodStart,
+      periodEnd: activityPeriodEnd,
+      dueDatesLabel,
+      dueCountInMonth,
+      dueThisMonth,
+      overdueCount,
+      overdueAmount,
+      totalDue,
+      scheduledBreakdown: {
+        total: scheduledTotal,
+        principal: scheduledPrincipal,
+        interest: scheduledInterest,
+        escrow: escrowPerPeriod,
+      },
+      totalsInMonth,
+      totalsInYear,
+      totalsBeforeYear,
+      totalsToEnd,
+      drawsInMonthTotal: round2(sumDraws(drawsInPeriod)),
+      paymentsInMonth: paymentsInPeriod,
+      drawsInMonth: drawsInPeriod,
+      transactions,
+      balanceEnd,
+      balanceStart,
+      statusLabel,
+      yearMonths,
+      accountNumber,
+      servicerName,
+      servicerAddress,
+      servicerPhone,
+      servicerWebsite,
+      borrowerAddress,
+      propertyAddress,
+      statementMessage,
+      statementDateLabel,
+      dueDateLabel,
+      maturityDate,
+      payoffDateLabel,
+    };
+  }, [selected, reportMonth, loanPaymentsAsc, draws]);
+
+  const canGenerateReports = !!reportData && Object.values(reportSelections).some(Boolean);
+  function handleGenerateReports() {
+    if (!canGenerateReports) return;
+    window.print();
+  }
+
   if (!authReady) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50 text-gray-600">
@@ -1508,7 +1883,7 @@ export default function LoanManagerMock() {
                 <input type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Next Payment Date</label>
+                <label className="block text-xs text-gray-600 mb-1">First Payment Date</label>
                 <input type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
@@ -1524,6 +1899,41 @@ export default function LoanManagerMock() {
               <div>
                 <label className="block text-xs text-gray-600 mb-1">Grace Days</label>
                 <input type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div className="col-span-2 pt-2 border-t">
+                <div className="text-xs uppercase tracking-wide text-gray-500">Statement Details (optional)</div>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Account Number</label>
+                <input value={nlAccountNumber} onChange={(e)=>setNlAccountNumber(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Servicer Name</label>
+                <input value={nlServicerName} onChange={(e)=>setNlServicerName(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Servicer Phone</label>
+                <input value={nlServicerPhone} onChange={(e)=>setNlServicerPhone(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Servicer Website</label>
+                <input value={nlServicerWebsite} onChange={(e)=>setNlServicerWebsite(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Servicer Address</label>
+                <textarea value={nlServicerAddress} onChange={(e)=>setNlServicerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Borrower Mailing Address</label>
+                <textarea value={nlBorrowerAddress} onChange={(e)=>setNlBorrowerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Property Address</label>
+                <textarea value={nlPropertyAddress} onChange={(e)=>setNlPropertyAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+              </div>
+              <div className="col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Statement Message</label>
+                <textarea value={nlStatementMessage} onChange={(e)=>setNlStatementMessage(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={3} />
               </div>
               <div className="col-span-2 flex items-center justify-between">
                 <div className="text-xs text-gray-600">{estNewPerLabel}</div>
@@ -1778,6 +2188,7 @@ export default function LoanManagerMock() {
           <div className="flex items-center gap-2">
             <button onClick={() => setMode('details')} className={`rounded-full px-4 py-2 text-sm border ${mode==='details' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Loan Details</button>
             <button onClick={() => setMode('calc')} className={`rounded-full px-4 py-2 text-sm border ${mode==='calc' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Calculator</button>
+            <button onClick={() => setMode('reports')} className={`rounded-full px-4 py-2 text-sm border ${mode==='reports' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Reports</button>
           </div>
 
           {mode === 'details' ? (
@@ -1806,20 +2217,42 @@ export default function LoanManagerMock() {
                 <div className="p-4 flex flex-col lg:flex-row gap-4">
                   <div className="flex-1 lg:w-2/3">
                     <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
-                      <Editable label="Borrower" value={selected.BorrowerName} edit={editMode} onChange={(v)=>setEl(s=>({...s,BorrowerName:v}))} />
-                      <Readonly label="Loan ID" value={selected.LoanID} />
-                      <EditableSelect label="Type" value={selected.LoanType} options={["Mortgage","Revolving LOC","Car Loan","Personal Loan","Credit Card"]} edit={editMode} onChange={(v)=>setEl(s=>({...s,LoanType:v}))} />
-                      <EditableNumber label="Original Principal" value={selected.OriginalPrincipal} edit={editMode} onChange={(v)=>setEl(s=>({...s,OriginalPrincipal:v}))} />
-                      <EditableNumber label="APR %" value={round2((selected.APR||0)*100)} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,APR:v}))} />
-                      <EditableNumber label="Term (months)" value={selected.TermMonths} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,TermMonths:v}))} />
-                      <Readonly label="Originated" value={fmt(selected.OriginationDate)} />
-                      <EditableDate label="Next Payment" value={toISODate(selected.NextPaymentDate)} edit={editMode} onChange={(v)=>setEl(s=>({...s,NextPaymentDate:v}))} />
-                      <EditableSelect label="Frequency" value={selected.PaymentFrequency} options={admin.frequencies} edit={editMode} onChange={(v)=>setEl(s=>({...s,PaymentFrequency:v}))} />
-                      <EditableNumber label="Escrow (mo)" value={selected.EscrowMonthly} step="0.01" edit={editMode} onChange={(v)=>setEl(s=>({...s,EscrowMonthly:v}))} />
-                      <EditableNumber label="Grace Days" value={selected.GraceDays} step="1" edit={editMode} onChange={(v)=>setEl(s=>({...s,GraceDays:v}))} />
+                      <Editable label="Borrower" value={selected.BorrowerName} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,BorrowerName:v}))} />
+                      <Readonly label="Loan ID" value={selected.LoanID} size="compact" />
+                      <EditableSelect label="Type" value={selected.LoanType} options={["Mortgage","Revolving LOC","Car Loan","Personal Loan","Credit Card"]} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,LoanType:v}))} />
+                      <EditableNumber label="Original Principal" value={selected.OriginalPrincipal} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,OriginalPrincipal:v}))} />
+                      <EditableNumber label="APR %" value={round2((selected.APR||0)*100)} step="0.01" edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,APR:v}))} />
+                      <EditableNumber label="Term (months)" value={selected.TermMonths} step="1" edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,TermMonths:v}))} />
+                      <Readonly label="Originated" value={fmt(selected.OriginationDate)} size="compact" />
+                      <EditableDate label="First Payment" value={toISODate(selected.NextPaymentDate)} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,NextPaymentDate:v}))} />
+                      <EditableSelect label="Frequency" value={selected.PaymentFrequency} options={admin.frequencies} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,PaymentFrequency:v}))} />
+                      <EditableNumber label="Escrow (mo)" value={selected.EscrowMonthly} step="0.01" edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,EscrowMonthly:v}))} />
+                      <EditableNumber label="Grace Days" value={selected.GraceDays} step="1" edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,GraceDays:v}))} />
                       <div className="sm:col-span-2">
-                        <EditableTextArea label="Notes" value={selected.Notes} edit={editMode} onChange={(v)=>setEl(s=>({...s,Notes:v}))} />
+                        <EditableTextArea label="Notes" value={selected.Notes} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,Notes:v}))} />
                       </div>
+                    </div>
+                    <div className="mt-4">
+                      <button
+                        type="button"
+                        onClick={() => setStatementDetailsOpen((open) => !open)}
+                        className="w-full flex items-center justify-between text-left"
+                      >
+                        <span className="text-xs uppercase tracking-wide text-gray-500">Statement Details</span>
+                        <span className="text-xs text-gray-400">{statementDetailsOpen ? 'Hide' : 'Show'}</span>
+                      </button>
+                      {statementDetailsOpen && (
+                        <div className="mt-2 grid sm:grid-cols-2 lg:grid-cols-3 gap-3 text-sm">
+                          <Editable label="Account Number" value={selected.AccountNumber} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,AccountNumber:v}))} />
+                          <Editable label="Servicer Name" value={selected.ServicerName} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,ServicerName:v}))} />
+                          <Editable label="Servicer Phone" value={selected.ServicerPhone} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,ServicerPhone:v}))} />
+                          <Editable label="Servicer Website" value={selected.ServicerWebsite} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,ServicerWebsite:v}))} />
+                          <EditableTextArea label="Servicer Address" value={selected.ServicerAddress} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,ServicerAddress:v}))} />
+                          <EditableTextArea label="Borrower Mailing Address" value={selected.BorrowerAddress} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,BorrowerAddress:v}))} />
+                          <EditableTextArea label="Property Address" value={selected.PropertyAddress} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,PropertyAddress:v}))} />
+                          <EditableTextArea label="Statement Message" value={selected.StatementMessage} edit={editMode} size="compact" onChange={(v)=>setEl(s=>({...s,StatementMessage:v}))} />
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -1988,7 +2421,7 @@ export default function LoanManagerMock() {
                 </div>
               </div>
             </>
-          ) : (
+          ) : mode === 'calc' ? (
             // ================= CALCULATOR VIEW =================
             <>
               <div className="rounded-2xl bg-white shadow-sm border">
@@ -2136,6 +2569,194 @@ export default function LoanManagerMock() {
                 </div>
               </div>
             </>
+          ) : (
+            // ================= REPORTS VIEW =================
+            <>
+              <div className="rounded-2xl bg-white shadow-sm border">
+                <div className="px-4 py-3 border-b">
+                  <div className="font-semibold">Reports</div>
+                </div>
+                <div className="p-4 space-y-4 no-print">
+                  <div className="text-sm text-gray-600">Select report(s) and month, then click Generate.</div>
+                  <div className="grid md:grid-cols-3 gap-3 text-sm">
+                    <div>
+                      <label className="block text-xs text-gray-600 mb-1">Statement month</label>
+                      <input
+                        type="month"
+                        value={reportMonth}
+                        onChange={(e) => setReportMonth(e.target.value)}
+                        className="rounded-lg border px-3 py-2 text-sm w-full"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <div className="text-xs text-gray-600 mb-1">Reports</div>
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={reportSelections.statement}
+                          onChange={(e) => setReportSelections((prev) => ({ ...prev, statement: e.target.checked }))}
+                        />
+                        <span>Monthly Mortgage Statement</span>
+                      </label>
+                    </div>
+                  </div>
+                  {!reportData && (
+                    <div className="text-xs text-gray-500">Select a month to enable statement generation.</div>
+                  )}
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={handleGenerateReports}
+                      disabled={!canGenerateReports}
+                      className="rounded-lg bg-violet-600 text-white px-4 py-2 text-sm shadow hover:bg-violet-700 disabled:opacity-60"
+                    >
+                      Generate
+                    </button>
+                  </div>
+                </div>
+                <div className="report-print-area">
+                  {reportSelections.statement && reportData && (
+                    <div className="report-page-break text-[11px] text-gray-800">
+                      <div className="border border-gray-300 p-4">
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="max-w-[60%]">
+                            <div className="text-xs uppercase tracking-wide text-gray-500">{reportData.servicerName}</div>
+                            <div className="whitespace-pre-line text-xs text-gray-600">{reportData.servicerAddress || '-'}</div>
+                            {reportData.servicerPhone && <div className="text-xs text-gray-600">Phone: {reportData.servicerPhone}</div>}
+                            {reportData.servicerWebsite && <div className="text-xs text-gray-600">Web: {reportData.servicerWebsite}</div>}
+                          </div>
+                          <div className="text-right min-w-[220px]">
+                            <div className="text-lg font-semibold">Mortgage Statement</div>
+                            <div className="text-xs text-gray-600">Statement Date: {reportData.statementDateLabel}</div>
+                            <div className="text-xs text-gray-600">Payment Due Date: {reportData.dueDateLabel}</div>
+                            <div className="text-xs text-gray-600">Account Number: {reportData.accountNumber || '-'}</div>
+                            <div className="mt-2 border border-gray-300 bg-gray-50 p-2 text-right">
+                              <div className="text-[10px] uppercase tracking-wide text-gray-500">Amount Due</div>
+                              <div className="text-xl font-semibold">{money(reportData.totalDue)}</div>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                          <div className="border border-gray-300 p-2">
+                            <div className="text-[10px] uppercase tracking-wide text-gray-500">Borrower</div>
+                            <div className="font-semibold">{selected.BorrowerName}</div>
+                            <div className="whitespace-pre-line">{reportData.borrowerAddress || '-'}</div>
+                          </div>
+                          <div className="border border-gray-300 p-2">
+                            <div className="text-[10px] uppercase tracking-wide text-gray-500">Property Address</div>
+                            <div className="whitespace-pre-line">{reportData.propertyAddress || '-'}</div>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                          <div className="border border-gray-300 p-2">
+                            <div className="text-[10px] uppercase tracking-wide text-gray-500">Account Information</div>
+                            <div className="flex justify-between"><span>Loan ID</span><span>{selected.LoanID}</span></div>
+                            <div className="flex justify-between"><span>Status</span><span>{reportData.statusLabel}</span></div>
+                            <div className="flex justify-between"><span>Interest Rate</span><span>{round2((selected.APR || 0) * 100).toFixed(3)}%</span></div>
+                            <div className="flex justify-between"><span>Origination Date</span><span>{fmt(selected.OriginationDate)}</span></div>
+                            <div className="flex justify-between"><span>Maturity Date</span><span>{reportData.maturityDate || '-'}</span></div>
+                            <div className="flex justify-between"><span>Current Payoff Date</span><span>{reportData.payoffDateLabel}</span></div>
+                            <div className="flex justify-between"><span>Outstanding Principal</span><span>{money(reportData.balanceEnd)}</span></div>
+                          </div>
+                          <div className="border border-gray-300 p-2">
+                            <div className="text-[10px] uppercase tracking-wide text-gray-500">Current Payment Due</div>
+                            <div className="flex justify-between"><span>Principal</span><span>{money(reportData.scheduledBreakdown.principal)}</span></div>
+                            <div className="flex justify-between"><span>Interest</span><span>{money(reportData.scheduledBreakdown.interest)}</span></div>
+                            <div className="flex justify-between"><span>Escrow</span><span>{money(reportData.scheduledBreakdown.escrow)}</span></div>
+                            <div className="flex justify-between font-semibold border-t border-gray-300 mt-1 pt-1">
+                              <span>Regular Payment</span><span>{money(reportData.scheduledBreakdown.total)}</span>
+                            </div>
+                            <div className="flex justify-between"><span>Past Due</span><span>{money(reportData.overdueAmount)}</span></div>
+                            <div className="flex justify-between font-semibold border-t border-gray-300 mt-1 pt-1">
+                              <span>Total Amount Due</span><span>{money(reportData.totalDue)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 border border-gray-300">
+                          <div className="px-2 py-1 bg-gray-100 text-[10px] uppercase tracking-wide text-gray-600">
+                            Transaction Activity ({fmt(reportData.periodStart)} - {fmt(reportData.periodEnd)})
+                          </div>
+                          <table className="min-w-full text-xs">
+                            <thead className="bg-gray-50 text-gray-600">
+                              <tr>
+                                <Th className="px-2 py-1">Date</Th>
+                                <Th className="px-2 py-1">Description</Th>
+                                <Th className="px-2 py-1">Charges</Th>
+                                <Th className="px-2 py-1">Payments</Th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {reportData.transactions.length === 0 ? (
+                                <tr>
+                                  <Td colSpan={4} className="text-center text-gray-500 py-4 px-2">No activity in this period.</Td>
+                                </tr>
+                              ) : (
+                                reportData.transactions.map((t) => (
+                                  <tr key={t.key}>
+                                    <Td className="px-2 py-1">{fmt(t.date)}</Td>
+                                    <Td className="px-2 py-1">{t.description}</Td>
+                                    <Td className="px-2 py-1">{t.charge ? money(t.charge) : '-'}</Td>
+                                    <Td className="px-2 py-1">{t.payment ? money(t.payment) : '-'}</Td>
+                                  </tr>
+                                ))
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div className="mt-3 border border-gray-300">
+                          <div className="px-2 py-1 bg-gray-100 text-[10px] uppercase tracking-wide text-gray-600">Past Payments Breakdown</div>
+                          <table className="min-w-full text-xs">
+                            <thead className="bg-gray-50 text-gray-600">
+                              <tr>
+                                <Th className="px-2 py-1">Description</Th>
+                                <Th className="px-2 py-1">Last Month</Th>
+                                <Th className="px-2 py-1">Year-to-Date</Th>
+                                <Th className="px-2 py-1">Life-to-Date</Th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              <tr>
+                                <Td className="px-2 py-1">Principal</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInMonth.principal)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInYear.principal)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsToEnd.principal)}</Td>
+                              </tr>
+                              <tr>
+                                <Td className="px-2 py-1">Interest</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInMonth.interest)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInYear.interest)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsToEnd.interest)}</Td>
+                              </tr>
+                              <tr>
+                                <Td className="px-2 py-1">Escrow</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInMonth.escrow)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInYear.escrow)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsToEnd.escrow)}</Td>
+                              </tr>
+                              <tr className="font-semibold">
+                                <Td className="px-2 py-1">Total</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInMonth.total)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsInYear.total)}</Td>
+                                <Td className="px-2 py-1">{money(reportData.totalsToEnd.total)}</Td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+
+                        <div className="mt-3 border border-gray-300 p-2">
+                          <div className="text-[10px] uppercase tracking-wide text-gray-500">Important Messages</div>
+                          <div className="whitespace-pre-line text-xs text-gray-700">{reportData.statementMessage}</div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -2195,72 +2816,84 @@ function Info({ label, value }) {
 function Static({ label, value }) {
   return <Info label={label} value={value} />;
 }
-function Readonly({ label, value }) {
+function fieldSizeClasses(size) {
+  if (size === 'compact') {
+    return { input: 'px-3 py-2.5', display: 'p-2.5' };
+  }
+  return { input: 'px-3 py-2', display: 'p-3' };
+}
+function Readonly({ label, value, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
-      <div className="rounded-xl border bg-white p-3">{value}</div>
+      <div className={`rounded-xl border bg-white ${sizes.display}`}>{value}</div>
     </div>
   );
 }
-function Editable({ label, value, edit, onChange }) {
+function Editable({ label, value, edit, onChange, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       {edit ? (
-        <input defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+        <input defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
-        <div className="rounded-xl border bg-white p-3">{value}</div>
+        <div className={`rounded-xl border bg-white ${sizes.display}`}>{value}</div>
       )}
     </div>
   );
 }
-function EditableNumber({ label, value, step = '0.01', edit, onChange }) {
+function EditableNumber({ label, value, step = '0.01', edit, onChange, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       {edit ? (
-        <input type="number" defaultValue={value} step={step} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+        <input type="number" defaultValue={value} step={step} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
-        <div className="rounded-xl border bg-white p-3">{typeof value === 'number' ? value : String(value)}</div>
+        <div className={`rounded-xl border bg-white ${sizes.display}`}>{typeof value === 'number' ? value : String(value)}</div>
       )}
     </div>
   );
 }
-function EditableSelect({ label, value, options, edit, onChange }) {
+function EditableSelect({ label, value, options, edit, onChange, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       {edit ? (
-        <select defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+        <select defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`}>
           {options.map(o => <option key={o} value={o}>{o}</option>)}
         </select>
       ) : (
-        <div className="rounded-xl border bg-white p-3">{value}</div>
+        <div className={`rounded-xl border bg-white ${sizes.display}`}>{value}</div>
       )}
     </div>
   );
 }
-function EditableDate({ label, value, edit, onChange }) {
+function EditableDate({ label, value, edit, onChange, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div>
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       {edit ? (
-        <input type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+        <input type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
-        <div className="rounded-xl border bg-white p-3">{toISODate(value)}</div>
+        <div className={`rounded-xl border bg-white ${sizes.display}`}>{toISODate(value)}</div>
       )}
     </div>
   );
 }
-function EditableTextArea({ label, value, edit, onChange }) {
+function EditableTextArea({ label, value, edit, onChange, size }) {
+  const sizes = fieldSizeClasses(size);
   return (
     <div className="sm:col-span-2 lg:col-span-3">
       <label className="block text-xs text-gray-600 mb-1">{label}</label>
       {edit ? (
-        <textarea defaultValue={value} onChange={(e)=>onChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+        <textarea defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} rows={2} />
       ) : (
-        <div className="rounded-xl border bg-white p-3 whitespace-pre-line">{value}</div>
+        <div className={`rounded-xl border bg-white ${sizes.display} whitespace-pre-line`}>{value}</div>
       )}
     </div>
   );
