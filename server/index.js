@@ -26,7 +26,7 @@ dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 4000);
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'loan-app.sqlite');
-const JWT_SECRET = process.env.JWT_SECRET || null;
+const JWT_SECRET = process.env.JWT_SECRET || '';
 const FALLBACK_JWT_SECRET = JWT_SECRET || 'dev-insecure-change-me';
 const NODE_ENV = process.env.NODE_ENV || 'development';
 const PASSWORD_MIN_LENGTH = 8;
@@ -100,6 +100,10 @@ function ensureDefaultAdmin() {
 }
 
 if (!JWT_SECRET) {
+  if (NODE_ENV === 'production') {
+    console.error('JWT_SECRET not set. Refusing to start in production.');
+    process.exit(1);
+  }
   console.warn('JWT_SECRET not set. Using insecure default secret.');
 }
 

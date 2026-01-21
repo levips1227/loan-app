@@ -554,6 +554,15 @@ export default function LoanManagerMock() {
   const [loginPassword, setLoginPassword] = React.useState('');
   const [loginError, setLoginError] = React.useState('');
   const [loginBusy, setLoginBusy] = React.useState(false);
+  const uiId = React.useId().replace(/:/g, '');
+  const searchInputId = `${uiId}-loan-search`;
+  const newLoanId = `${uiId}-new-loan`;
+  const paymentModalId = `${uiId}-payment-modal`;
+  const inlinePaymentId = `${uiId}-inline-payment`;
+  const drawId = `${uiId}-draw`;
+  const calcId = `${uiId}-calc`;
+  const reportId = `${uiId}-report`;
+  const resetId = `${uiId}-reset`;
 
   // --- Settings panel ---
   const [settingsOpen, setSettingsOpen] = React.useState(false);
@@ -1059,7 +1068,7 @@ export default function LoanManagerMock() {
     }
   }
 
-  const selected = loans.find((l) => l.id === selectedId);
+  const selected = loans.find((l) => l.id === selectedId) || null;
   const loanPaymentsDesc = payments
     .filter((p) => p.LoanRef === selectedId)
     .sort((a, b) => parseISO(b.PaymentDate) - parseISO(a.PaymentDate));
@@ -1068,14 +1077,18 @@ export default function LoanManagerMock() {
   const principalPaid = loanPaymentsDesc.reduce((s, p) => s + (p.PrincipalPortion ?? 0), 0);
   const interestPaid = loanPaymentsDesc.reduce((s, p) => s + (p.InterestPortion ?? 0), 0);
   const totalPayments = loanPaymentsDesc.reduce((s, p) => s + (p.Amount ?? 0), 0);
-  const balance = Math.max(0, round2((selected.OriginalPrincipal ?? 0) - principalPaid + draws.filter(d => d.LoanRef===selected.id).reduce((s,d)=>s+(d.Amount||0),0)));
-  const lastPayDate = loanPaymentsDesc.length ? parseISO(loanPaymentsAsc[loanPaymentsAsc.length - 1].PaymentDate) : parseISO(selected.OriginationDate);
-  const daysSince = daysBetween(lastPayDate, new Date());
-  const perDiem = calcPerDiem(selected.APR, balance);
-  const payoff = calcPayoff(balance, selected.APR, daysSince);
+  const balance = selected
+    ? Math.max(0, round2((selected.OriginalPrincipal ?? 0) - principalPaid + draws.filter(d => d.LoanRef===selected.id).reduce((s,d)=>s+(d.Amount||0),0)))
+    : 0;
+  const lastPayDate = loanPaymentsDesc.length
+    ? parseISO(loanPaymentsAsc[loanPaymentsAsc.length - 1].PaymentDate)
+    : (selected ? parseISO(selected.OriginationDate) : new Date());
+  const daysSince = selected ? daysBetween(lastPayDate, new Date()) : 0;
+  const perDiem = selected ? calcPerDiem(selected.APR, balance) : 0;
+  const payoff = selected ? calcPayoff(balance, selected.APR, daysSince) : 0;
 
   // Scheduled payment (P&I + escrow) by frequency & type
-  const scheduledCurrent = scheduledPaymentFor(selected, balance);
+  const scheduledCurrent = selected ? scheduledPaymentFor(selected, balance) : 0;
 
   const filteredLoans = loans.filter((l) => !query || l.BorrowerName.toLowerCase().includes(query.toLowerCase()) || l.LoanID.toLowerCase().includes(query.toLowerCase()));
   function nextLoanId() {
@@ -1775,6 +1788,9 @@ export default function LoanManagerMock() {
 
           <div className="ml-auto flex items-center gap-3 w-full justify-end">
             <input
+              id={searchInputId}
+              name="loanSearch"
+              aria-label="Search loans"
               className="w-52 sm:w-64 md:w-72 rounded-xl border bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
               placeholder="Search borrower or Loan ID"
               value={query}
@@ -1815,13 +1831,13 @@ export default function LoanManagerMock() {
               {settingsError && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2">{settingsError}</div>}
               {settingsSuccess && <div className="rounded-lg border border-green-200 bg-green-50 text-green-700 px-3 py-2">{settingsSuccess}</div>}
               <FormRow label="Current password">
-                <input type="password" value={currentPassword} onChange={(e)=>setCurrentPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <input name="currentPassword" type="password" value={currentPassword} onChange={(e)=>setCurrentPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </FormRow>
               <FormRow label={`New password (min ${PASSWORD_MIN_LENGTH})`}>
-                <input type="password" value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <input name="newPassword" type="password" value={newPassword} onChange={(e)=>setNewPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </FormRow>
               <FormRow label="Confirm new password">
-                <input type="password" value={confirmPassword} onChange={(e)=>setConfirmPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <input name="confirmPassword" type="password" value={confirmPassword} onChange={(e)=>setConfirmPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </FormRow>
               <div className="flex justify-end gap-2">
                 <button onClick={handleChangeOwnPassword} className="text-xs rounded-md bg-violet-600 text-white px-3 py-2">Update Password</button>
@@ -1845,95 +1861,95 @@ export default function LoanManagerMock() {
             </div>
             <div className="p-4 grid grid-cols-2 gap-3 text-sm">
               <div className="col-span-2">
-                <label className="block text-xs text-gray-600 mb-1">Borrower</label>
-                <input value={nlBorrower} onChange={(e)=>setNlBorrower(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Full name" />
+                <label htmlFor={`${newLoanId}-borrower`} className="block text-xs text-gray-600 mb-1">Borrower</label>
+                <input id={`${newLoanId}-borrower`} name="borrower" value={nlBorrower} onChange={(e)=>setNlBorrower(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Full name" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Principal</label>
-                <input type="number" min="0" step="0.01" value={nlPrincipal} onChange={(e)=>setNlPrincipal(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-principal`} className="block text-xs text-gray-600 mb-1">Principal</label>
+                <input id={`${newLoanId}-principal`} name="principal" type="number" min="0" step="0.01" value={nlPrincipal} onChange={(e)=>setNlPrincipal(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">APR % (e.g. 6.50)</label>
-                <input type="number" min="0" step="0.01" value={nlAPR} onChange={(e)=>setNlAPR(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-apr`} className="block text-xs text-gray-600 mb-1">APR % (e.g. 6.50)</label>
+                <input id={`${newLoanId}-apr`} name="apr" type="number" min="0" step="0.01" value={nlAPR} onChange={(e)=>setNlAPR(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Term (months)</label>
-                <input type="number" min="1" step="1" value={nlTerm} onChange={(e)=>setNlTerm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-term`} className="block text-xs text-gray-600 mb-1">Term (months)</label>
+                <input id={`${newLoanId}-term`} name="termMonths" type="number" min="1" step="1" value={nlTerm} onChange={(e)=>setNlTerm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Type</label>
-                <select value={nlType} onChange={(e)=>setNlType(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                <label htmlFor={`${newLoanId}-type`} className="block text-xs text-gray-600 mb-1">Type</label>
+                <select id={`${newLoanId}-type`} name="loanType" value={nlType} onChange={(e)=>setNlType(e.target.value)} className="w-full rounded-xl border px-3 py-2">
                   {['Mortgage','Revolving LOC','Car Loan','Personal Loan','Credit Card'].map(t => <option key={t} value={t}>{t}</option>)}
                 </select>
               </div>
               <div>
                 <label className="inline-flex items-center mt-2">
-                  <input type="checkbox" checked={nlFixedPayment} onChange={(e)=>setNlFixedPayment(e.target.checked)} className="mr-2" />
+                  <input id={`${newLoanId}-fixed-payment`} name="fixedPayment" type="checkbox" checked={nlFixedPayment} onChange={(e)=>setNlFixedPayment(e.target.checked)} className="mr-2" />
                   <span className="text-xs text-gray-600">Fixed payment</span>
                 </label>
               </div>
               {nlType === 'Revolving LOC' && (
                 <div>
-                  <label className="block text-xs text-gray-600 mb-1">Credit Limit</label>
-                  <input type="number" min="0" step="0.01" value={nlCreditLimit} onChange={(e)=>setNlCreditLimit(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                  <label htmlFor={`${newLoanId}-credit-limit`} className="block text-xs text-gray-600 mb-1">Credit Limit</label>
+                  <input id={`${newLoanId}-credit-limit`} name="creditLimit" type="number" min="0" step="0.01" value={nlCreditLimit} onChange={(e)=>setNlCreditLimit(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                 </div>
               )}
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Origination Date</label>
-                <input type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-origination-date`} className="block text-xs text-gray-600 mb-1">Origination Date</label>
+                <input id={`${newLoanId}-origination-date`} name="originationDate" type="date" value={nlStart} onChange={(e)=>setNlStart(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">First Payment Date</label>
-                <input type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-first-payment-date`} className="block text-xs text-gray-600 mb-1">First Payment Date</label>
+                <input id={`${newLoanId}-first-payment-date`} name="firstPaymentDate" type="date" value={nlNextDue} onChange={(e)=>setNlNextDue(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Frequency</label>
-                <select value={nlFreq} onChange={(e)=>setNlFreq(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                <label htmlFor={`${newLoanId}-frequency`} className="block text-xs text-gray-600 mb-1">Frequency</label>
+                <select id={`${newLoanId}-frequency`} name="paymentFrequency" value={nlFreq} onChange={(e)=>setNlFreq(e.target.value)} className="w-full rounded-xl border px-3 py-2">
                   {admin.frequencies.map(f => <option key={f} value={f}>{f}</option>)}
                 </select>
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Escrow (monthly)</label>
-                <input type="number" min="0" step="0.01" value={nlEscrow} onChange={(e)=>setNlEscrow(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-escrow`} className="block text-xs text-gray-600 mb-1">Escrow (monthly)</label>
+                <input id={`${newLoanId}-escrow`} name="escrowMonthly" type="number" min="0" step="0.01" value={nlEscrow} onChange={(e)=>setNlEscrow(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Grace Days</label>
-                <input type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-grace-days`} className="block text-xs text-gray-600 mb-1">Grace Days</label>
+                <input id={`${newLoanId}-grace-days`} name="graceDays" type="number" min="0" step="1" value={nlGrace} onChange={(e)=>setNlGrace(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div className="col-span-2 pt-2 border-t">
                 <div className="text-xs uppercase tracking-wide text-gray-500">Statement Details (optional)</div>
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Account Number</label>
-                <input value={nlAccountNumber} onChange={(e)=>setNlAccountNumber(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-account-number`} className="block text-xs text-gray-600 mb-1">Account Number</label>
+                <input id={`${newLoanId}-account-number`} name="accountNumber" value={nlAccountNumber} onChange={(e)=>setNlAccountNumber(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Servicer Name</label>
-                <input value={nlServicerName} onChange={(e)=>setNlServicerName(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-servicer-name`} className="block text-xs text-gray-600 mb-1">Servicer Name</label>
+                <input id={`${newLoanId}-servicer-name`} name="servicerName" value={nlServicerName} onChange={(e)=>setNlServicerName(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Servicer Phone</label>
-                <input value={nlServicerPhone} onChange={(e)=>setNlServicerPhone(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-servicer-phone`} className="block text-xs text-gray-600 mb-1">Servicer Phone</label>
+                <input id={`${newLoanId}-servicer-phone`} name="servicerPhone" value={nlServicerPhone} onChange={(e)=>setNlServicerPhone(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Servicer Website</label>
-                <input value={nlServicerWebsite} onChange={(e)=>setNlServicerWebsite(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${newLoanId}-servicer-website`} className="block text-xs text-gray-600 mb-1">Servicer Website</label>
+                <input id={`${newLoanId}-servicer-website`} name="servicerWebsite" value={nlServicerWebsite} onChange={(e)=>setNlServicerWebsite(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div className="col-span-2">
-                <label className="block text-xs text-gray-600 mb-1">Servicer Address</label>
-                <textarea value={nlServicerAddress} onChange={(e)=>setNlServicerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+                <label htmlFor={`${newLoanId}-servicer-address`} className="block text-xs text-gray-600 mb-1">Servicer Address</label>
+                <textarea id={`${newLoanId}-servicer-address`} name="servicerAddress" value={nlServicerAddress} onChange={(e)=>setNlServicerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
               </div>
               <div className="col-span-2">
-                <label className="block text-xs text-gray-600 mb-1">Borrower Mailing Address</label>
-                <textarea value={nlBorrowerAddress} onChange={(e)=>setNlBorrowerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+                <label htmlFor={`${newLoanId}-borrower-address`} className="block text-xs text-gray-600 mb-1">Borrower Mailing Address</label>
+                <textarea id={`${newLoanId}-borrower-address`} name="borrowerAddress" value={nlBorrowerAddress} onChange={(e)=>setNlBorrowerAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
               </div>
               <div className="col-span-2">
-                <label className="block text-xs text-gray-600 mb-1">Property Address</label>
-                <textarea value={nlPropertyAddress} onChange={(e)=>setNlPropertyAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
+                <label htmlFor={`${newLoanId}-property-address`} className="block text-xs text-gray-600 mb-1">Property Address</label>
+                <textarea id={`${newLoanId}-property-address`} name="propertyAddress" value={nlPropertyAddress} onChange={(e)=>setNlPropertyAddress(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={2} />
               </div>
               <div className="col-span-2">
-                <label className="block text-xs text-gray-600 mb-1">Statement Message</label>
-                <textarea value={nlStatementMessage} onChange={(e)=>setNlStatementMessage(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={3} />
+                <label htmlFor={`${newLoanId}-statement-message`} className="block text-xs text-gray-600 mb-1">Statement Message</label>
+                <textarea id={`${newLoanId}-statement-message`} name="statementMessage" value={nlStatementMessage} onChange={(e)=>setNlStatementMessage(e.target.value)} className="w-full rounded-xl border px-3 py-2" rows={3} />
               </div>
               <div className="col-span-2 flex items-center justify-between">
                 <div className="text-xs text-gray-600">{estNewPerLabel}</div>
@@ -1958,33 +1974,33 @@ export default function LoanManagerMock() {
             </div>
             <div className="p-4 grid md:grid-cols-6 gap-3 items-start text-sm">
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Payment date</label>
-                <input type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                <label htmlFor={`${paymentModalId}-date`} className="block text-xs text-gray-600 mb-1">Payment date</label>
+                <input id={`${paymentModalId}-date`} name="paymentDate" type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Amount</label>
-                <input type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                <label htmlFor={`${paymentModalId}-amount`} className="block text-xs text-gray-600 mb-1">Amount</label>
+                <input id={`${paymentModalId}-amount`} name="amount" type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
                 <div className="text-[11px] text-gray-500 mt-1">Prefilled with {selected.PaymentFrequency || 'Monthly'}: {money(pScheduled || 0)}</div>
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
-                <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                <label htmlFor={`${paymentModalId}-extra`} className="block text-xs text-gray-600 mb-1">Additional Principal</label>
+                <input id={`${paymentModalId}-extra`} name="additionalPrincipal" type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
               </div>
               <div className="md:col-span-2 flex items-start gap-2">
-                <input id="scheduledFlagModal" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
-                <label htmlFor="scheduledFlagModal" className="text-sm text-gray-700">
+                <input id={`${paymentModalId}-scheduled`} name="scheduledPayment" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
+                <label htmlFor={`${paymentModalId}-scheduled`} className="text-sm text-gray-700">
                   Apply as scheduled monthly payment (early regular payment). Uncheck to post as unscheduled principal-only curtailment.
                 </label>
               </div>
               <div>
-                <label className="block text-xs text-gray-600 mb-1">Method</label>
-                <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                <label htmlFor={`${paymentModalId}-method`} className="block text-xs text-gray-600 mb-1">Method</label>
+                <select id={`${paymentModalId}-method`} name="paymentMethod" value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
                   {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
                 </select>
               </div>
               <div className="md:col-span-4">
-                <label className="block text-xs text-gray-600 mb-1">Reference</label>
-                <input value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
+                <label htmlFor={`${paymentModalId}-reference`} className="block text-xs text-gray-600 mb-1">Reference</label>
+                <input id={`${paymentModalId}-reference`} name="paymentReference" value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
               </div>
               <div className="md:col-span-6 flex justify-end gap-2">
                 <button onClick={() => setPaymentModalOpen(false)} className="rounded-xl border px-4 py-2 text-sm">Cancel</button>
@@ -2013,16 +2029,16 @@ export default function LoanManagerMock() {
             {adminTab === 'defaults' && !!adminDraft && (
               <div className="grid sm:grid-cols-2 gap-3 text-sm">
                 <FormRow label="Grace days (default)">
-                  <input type="number" min={0} value={adminDraft.graceDaysDefault} onChange={(e)=>setAdminDraft({...adminDraft,graceDaysDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                  <input name="graceDaysDefault" type="number" min={0} value={adminDraft.graceDaysDefault} onChange={(e)=>setAdminDraft({...adminDraft,graceDaysDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                 </FormRow>
                 <FormRow label="Late fee flat (default)">
-                  <input type="number" min={0} step="0.01" value={adminDraft.lateFeeFlatDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeeFlatDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                  <input name="lateFeeFlatDefault" type="number" min={0} step="0.01" value={adminDraft.lateFeeFlatDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeeFlatDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                 </FormRow>
                 <FormRow label="Late fee % (default)">
-                  <input type="number" min={0} step="0.01" value={adminDraft.lateFeePctDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeePctDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                  <input name="lateFeePctDefault" type="number" min={0} step="0.01" value={adminDraft.lateFeePctDefault} onChange={(e)=>setAdminDraft({...adminDraft,lateFeePctDefault:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                 </FormRow>
                 <FormRow label="Frequencies (comma-separated)">
-                  <input value={adminDraft.frequencies} onChange={(e)=>setAdminDraft({...adminDraft,frequencies:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                  <input name="frequencies" value={adminDraft.frequencies} onChange={(e)=>setAdminDraft({...adminDraft,frequencies:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                 </FormRow>
               </div>
             )}
@@ -2032,21 +2048,21 @@ export default function LoanManagerMock() {
                 {userMgmtMessage && <div className="rounded-lg border border-green-200 bg-green-50 text-green-700 px-3 py-2">{userMgmtMessage}</div>}
                 <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-3">
                   <FormRow label="Username">
-                    <input value={userForm.username} onChange={(e)=>setUserForm((p)=>({...p,username:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                    <input name="userUsername" value={userForm.username} onChange={(e)=>setUserForm((p)=>({...p,username:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
                   </FormRow>
                   <FormRow label="Role">
-                    <select value={userForm.role} onChange={(e)=>setUserForm((p)=>({...p,role:e.target.value}))} className="w-full rounded-xl border px-3 py-2">
+                    <select name="userRole" value={userForm.role} onChange={(e)=>setUserForm((p)=>({...p,role:e.target.value}))} className="w-full rounded-xl border px-3 py-2">
                       {USER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
                     </select>
                   </FormRow>
                   {!userEditId && (
                     <FormRow label={`Password (min ${PASSWORD_MIN_LENGTH})`}>
-                      <input type="password" value={userForm.password} onChange={(e)=>setUserForm((p)=>({...p,password:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                      <input name="userPassword" type="password" value={userForm.password} onChange={(e)=>setUserForm((p)=>({...p,password:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
                     </FormRow>
                   )}
                   {!userEditId && (
                     <FormRow label="Confirm password">
-                      <input type="password" value={userForm.confirm} onChange={(e)=>setUserForm((p)=>({...p,confirm:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
+                      <input name="userConfirmPassword" type="password" value={userForm.confirm} onChange={(e)=>setUserForm((p)=>({...p,confirm:e.target.value}))} className="w-full rounded-xl border px-3 py-2" />
                     </FormRow>
                   )}
                 </div>
@@ -2092,12 +2108,12 @@ export default function LoanManagerMock() {
                               <Td colSpan={4}>
                                 <div className="grid sm:grid-cols-2 gap-3 items-end">
                                   <div>
-                                    <label className="text-xs text-gray-600 mb-1 block">New password</label>
-                                    <input type="password" value={resetPassword} onChange={(e)=>setResetPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                                    <label htmlFor={`${resetId}-password-${u.id}`} className="text-xs text-gray-600 mb-1 block">New password</label>
+                                    <input id={`${resetId}-password-${u.id}`} name={`resetPassword-${u.id}`} type="password" value={resetPassword} onChange={(e)=>setResetPassword(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                                   </div>
                                   <div>
-                                    <label className="text-xs text-gray-600 mb-1 block">Confirm password</label>
-                                    <input type="password" value={resetConfirm} onChange={(e)=>setResetConfirm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                                    <label htmlFor={`${resetId}-confirm-${u.id}`} className="text-xs text-gray-600 mb-1 block">Confirm password</label>
+                                    <input id={`${resetId}-confirm-${u.id}`} name={`resetConfirm-${u.id}`} type="password" value={resetConfirm} onChange={(e)=>setResetConfirm(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                                   </div>
                                   <div className="flex gap-2 sm:col-span-2 justify-end">
                                     <button onClick={() => { setResetUserId(null); setResetPassword(''); setResetConfirm(''); }} className="text-xs rounded-md border px-3 py-1">Cancel</button>
@@ -2191,7 +2207,13 @@ export default function LoanManagerMock() {
             <button onClick={() => setMode('reports')} className={`rounded-full px-4 py-2 text-sm border ${mode==='reports' ? 'bg-violet-600 text-white' : 'bg-white'}`}>Reports</button>
           </div>
 
-          {mode === 'details' ? (
+          {!selected ? (
+            <div className="rounded-2xl bg-white shadow-sm border p-6 text-sm text-gray-600">
+              <div className="font-semibold text-gray-800">No loans yet</div>
+              <div className="mt-1">Create your first loan to view details, payments, and reports.</div>
+              <button onClick={toggleNewLoan} className="mt-4 rounded-xl bg-violet-600 text-white px-4 py-2 text-sm shadow hover:bg-violet-700">New Loan</button>
+            </div>
+          ) : mode === 'details' ? (
             <>
               {/* Summary card */}
               <div className="rounded-2xl bg-white shadow-sm border">
@@ -2296,14 +2318,14 @@ export default function LoanManagerMock() {
                         <tr key={p.id} className="hover:bg-gray-50">
                           <Td>
                             {editId === p.id ? (
-                              <input type="date" value={eDate} onChange={(e)=>setEDate(e.target.value)} className="rounded-md border px-2 py-1" />
+                              <input type="date" name={`editPaymentDate-${p.id}`} aria-label="Edit payment date" value={eDate} onChange={(e)=>setEDate(e.target.value)} className="rounded-md border px-2 py-1" />
                             ) : (
                               fmt(p.PaymentDate)
                             )}
                           </Td>
                           <Td>
                             {editId === p.id ? (
-                              <input type="number" min="0" step="0.01" value={eAmt} onChange={(e)=>setEAmt(e.target.value)} className="rounded-md border px-2 py-1 w-28" />
+                              <input type="number" name={`editPaymentAmount-${p.id}`} aria-label="Edit payment amount" min="0" step="0.01" value={eAmt} onChange={(e)=>setEAmt(e.target.value)} className="rounded-md border px-2 py-1 w-28" />
                             ) : (
                               money(p.Amount)
                             )}
@@ -2313,7 +2335,7 @@ export default function LoanManagerMock() {
                           <Td>{money(p.EscrowPortion)}</Td>
                           <Td>
                             {editId === p.id ? (
-                              <select value={eMethod} onChange={(e)=>setEMethod(e.target.value)} className="rounded-md border px-2 py-1">
+                              <select name={`editPaymentMethod-${p.id}`} aria-label="Edit payment method" value={eMethod} onChange={(e)=>setEMethod(e.target.value)} className="rounded-md border px-2 py-1">
                                 {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
                               </select>
                             ) : (
@@ -2322,7 +2344,7 @@ export default function LoanManagerMock() {
                           </Td>
                           <Td>
                             {editId === p.id ? (
-                              <input value={eRef} onChange={(e)=>setERef(e.target.value)} className="rounded-md border px-2 py-1" />
+                              <input name={`editPaymentReference-${p.id}`} aria-label="Edit payment reference" value={eRef} onChange={(e)=>setERef(e.target.value)} className="rounded-md border px-2 py-1" />
                             ) : (
                               p.Reference || ''
                             )}
@@ -2351,33 +2373,33 @@ export default function LoanManagerMock() {
                 {/* Post payment panel */}
                 <div className="border-t p-4 grid md:grid-cols-6 gap-3">
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">Payment date</label>
-                    <input type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                    <label htmlFor={`${inlinePaymentId}-date`} className="block text-xs text-gray-600 mb-1">Payment date</label>
+                    <input id={`${inlinePaymentId}-date`} name="paymentDate" type="date" value={pDate} onChange={(e) => setPDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                   </div>
                   <div>
-                    <label className="block text-xs text-gray-600 mb-1">Amount</label>
-                    <input type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                    <label htmlFor={`${inlinePaymentId}-amount`} className="block text-xs text-gray-600 mb-1">Amount</label>
+                    <input id={`${inlinePaymentId}-amount`} name="amount" type="number" min="0" step="0.01" value={pAmt} onChange={(e) => handleAmountChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
                     <div className="text-[11px] text-gray-500 mt-1">Prefilled with {selected.PaymentFrequency || 'Monthly'}: {money(pScheduled || 0)}</div>
                   </div>
                 <div>
-                  <label className="block text-xs text-gray-600 mb-1">Additional Principal</label>
-                  <input type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
+                  <label htmlFor={`${inlinePaymentId}-extra`} className="block text-xs text-gray-600 mb-1">Additional Principal</label>
+                  <input id={`${inlinePaymentId}-extra`} name="additionalPrincipal" type="number" min="0" step="0.01" value={pExtra} onChange={(e) => handleExtraChange(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="0.00" />
                 </div>
                 <div className="md:col-span-2 flex items-start gap-2 pt-5">
-                  <input id="scheduledFlag" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
-                  <label htmlFor="scheduledFlag" className="text-sm text-gray-700">
+                  <input id={`${inlinePaymentId}-scheduled`} name="scheduledPayment" type="checkbox" checked={pScheduled} onChange={(e)=>setPScheduled(e.target.checked)} className="mt-1" />
+                  <label htmlFor={`${inlinePaymentId}-scheduled`} className="text-sm text-gray-700">
                     Apply as scheduled monthly payment (early regular payment). Uncheck to post as unscheduled principal-only curtailment.
                   </label>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-600 mb-1">Method</label>
-                  <select value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
+                  <label htmlFor={`${inlinePaymentId}-method`} className="block text-xs text-gray-600 mb-1">Method</label>
+                  <select id={`${inlinePaymentId}-method`} name="paymentMethod" value={pMethod} onChange={(e) => setPMethod(e.target.value)} className="w-full rounded-xl border px-3 py-2">
                     {['ACH','Cash','Check','Card','Other'].map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
                   </div>
                   <div className="md:col-span-2">
-                    <label className="block text-xs text-gray-600 mb-1">Reference</label>
-                    <input value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
+                    <label htmlFor={`${inlinePaymentId}-reference`} className="block text-xs text-gray-600 mb-1">Reference</label>
+                    <input id={`${inlinePaymentId}-reference`} name="paymentReference" value={pRef} onChange={(e) => setPRef(e.target.value)} className="w-full rounded-xl border px-3 py-2" placeholder="Note, check #, etc." />
                   </div>
                   <div className="md:col-span-6 flex items-center justify-between">
                     {isRevolving && (
@@ -2391,12 +2413,12 @@ export default function LoanManagerMock() {
                       <div className="font-semibold mb-2">Add Draw (Revolving LOC)</div>
                       <div className="grid sm:grid-cols-4 gap-2 items-end">
                         <div>
-                          <label className="block text-xs text-gray-600 mb-1">Draw date</label>
-                          <input type="date" value={drawDate} onChange={(e)=>setDrawDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                          <label htmlFor={`${drawId}-date`} className="block text-xs text-gray-600 mb-1">Draw date</label>
+                          <input id={`${drawId}-date`} name="drawDate" type="date" value={drawDate} onChange={(e)=>setDrawDate(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                         </div>
                         <div>
-                          <label className="block text-xs text-gray-600 mb-1">Amount</label>
-                          <input type="number" min="0" step="0.01" value={drawAmt} onChange={(e)=>setDrawAmt(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
+                          <label htmlFor={`${drawId}-amount`} className="block text-xs text-gray-600 mb-1">Amount</label>
+                          <input id={`${drawId}-amount`} name="drawAmount" type="number" min="0" step="0.01" value={drawAmt} onChange={(e)=>setDrawAmt(e.target.value)} className="w-full rounded-xl border px-3 py-2" />
                         </div>
                         <div className="sm:col-span-2 flex gap-2">
                           <button onClick={addDraw} className="rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold">Add Draw</button>
@@ -2438,16 +2460,18 @@ export default function LoanManagerMock() {
                     {calcExtrasDraft.map((x) => (
                       <div key={x.id} className="rounded-xl border p-3 grid sm:grid-cols-8 gap-3 items-end">
                         <div className="sm:col-span-2">
-                          <label className="block text-xs text-gray-600 mb-1">Type</label>
-                          <select value={x.kind} onChange={(e)=>updateCalcExtra(x.id,{kind:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                          <label htmlFor={`${calcId}-extra-${x.id}-type`} className="block text-xs text-gray-600 mb-1">Type</label>
+                          <select id={`${calcId}-extra-${x.id}-type`} name={`extraType-${x.id}`} value={x.kind} onChange={(e)=>updateCalcExtra(x.id,{kind:e.target.value})} className="w-full rounded-xl border px-3 py-2">
                             <option value="recurring">Recurring</option>
                             <option value="once">One-time</option>
                           </select>
                         </div>
                         <div className="sm:col-span-2">
-                          <label className="block text-xs text-gray-600 mb-1">Amount</label>
+                          <label htmlFor={`${calcId}-extra-${x.id}-amount`} className="block text-xs text-gray-600 mb-1">Amount</label>
                           <input
                             type="number"
+                            id={`${calcId}-extra-${x.id}-amount`}
+                            name={`extraAmount-${x.id}`}
                             min="0"
                             step="0.01"
                             value={x.amount}
@@ -2459,20 +2483,20 @@ export default function LoanManagerMock() {
                         {x.kind === 'recurring' ? (
                           <>
                             <div className="sm:col-span-2">
-                              <label className="block text-xs text-gray-600 mb-1">Every</label>
-                              <select value={x.every} onChange={(e)=>updateCalcExtra(x.id,{every:e.target.value})} className="w-full rounded-xl border px-3 py-2">
+                              <label htmlFor={`${calcId}-extra-${x.id}-every`} className="block text-xs text-gray-600 mb-1">Every</label>
+                              <select id={`${calcId}-extra-${x.id}-every`} name={`extraEvery-${x.id}`} value={x.every} onChange={(e)=>updateCalcExtra(x.id,{every:e.target.value})} className="w-full rounded-xl border px-3 py-2">
                                 {['day','week','month','year'].map(o=> <option key={o} value={o}>{o}</option>)}
                               </select>
                             </div>
                             <div className="sm:col-span-2">
-                              <label className="block text-xs text-gray-600 mb-1">Start</label>
-                              <input type="date" value={x.start} onChange={(e)=>updateCalcExtra(x.id,{start:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                              <label htmlFor={`${calcId}-extra-${x.id}-start`} className="block text-xs text-gray-600 mb-1">Start</label>
+                              <input id={`${calcId}-extra-${x.id}-start`} name={`extraStart-${x.id}`} type="date" value={x.start} onChange={(e)=>updateCalcExtra(x.id,{start:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                             </div>
                           </>
                         ) : (
                             <div className="sm:col-span-3">
-                              <label className="block text-xs text-gray-600 mb-1">Date</label>
-                              <input type="date" value={x.date} onChange={(e)=>updateCalcExtra(x.id,{date:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
+                              <label htmlFor={`${calcId}-extra-${x.id}-date`} className="block text-xs text-gray-600 mb-1">Date</label>
+                              <input id={`${calcId}-extra-${x.id}-date`} name={`extraDate-${x.id}`} type="date" value={x.date} onChange={(e)=>updateCalcExtra(x.id,{date:e.target.value})} className="w-full rounded-xl border px-3 py-2" />
                             </div>
                           )}
                         <div className="sm:col-span-2 flex justify-end items-center gap-2">
@@ -2580,9 +2604,11 @@ export default function LoanManagerMock() {
                   <div className="text-sm text-gray-600">Select report(s) and month, then click Generate.</div>
                   <div className="grid md:grid-cols-3 gap-3 text-sm">
                     <div>
-                      <label className="block text-xs text-gray-600 mb-1">Statement month</label>
+                      <label htmlFor={`${reportId}-month`} className="block text-xs text-gray-600 mb-1">Statement month</label>
                       <input
                         type="month"
+                        id={`${reportId}-month`}
+                        name="reportMonth"
                         value={reportMonth}
                         onChange={(e) => setReportMonth(e.target.value)}
                         className="rounded-lg border px-3 py-2 text-sm w-full"
@@ -2593,6 +2619,8 @@ export default function LoanManagerMock() {
                       <label className="flex items-center gap-2 text-sm">
                         <input
                           type="checkbox"
+                          id={`${reportId}-statement`}
+                          name="reportStatement"
                           checked={reportSelections.statement}
                           onChange={(e) => setReportSelections((prev) => ({ ...prev, statement: e.target.checked }))}
                         />
@@ -2765,6 +2793,9 @@ export default function LoanManagerMock() {
 }
 
 function LoginView({ username, password, onUsernameChange, onPasswordChange, onSubmit, error, busy }) {
+  const loginId = React.useId().replace(/:/g, '');
+  const usernameId = `${loginId}-username`;
+  const passwordId = `${loginId}-password`;
   return (
     <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-violet-50 to-blue-50 px-4">
       <div className="w-full max-w-md rounded-2xl bg-white border shadow-lg p-6 space-y-4">
@@ -2775,12 +2806,12 @@ function LoginView({ username, password, onUsernameChange, onPasswordChange, onS
         {error && <div className="rounded-lg border border-red-200 bg-red-50 text-red-700 px-3 py-2">{error}</div>}
         <form className="space-y-3" onSubmit={onSubmit}>
           <div>
-            <label className="block text-xs text-gray-600 mb-1">Username</label>
-            <input value={username} onChange={(e)=>onUsernameChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter username" autoComplete="username" />
+            <label htmlFor={usernameId} className="block text-xs text-gray-600 mb-1">Username</label>
+            <input id={usernameId} name="username" value={username} onChange={(e)=>onUsernameChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter username" autoComplete="username" />
           </div>
           <div>
-            <label className="block text-xs text-gray-600 mb-1">Password</label>
-            <input type="password" value={password} onChange={(e)=>onPasswordChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter password" autoComplete="current-password" />
+            <label htmlFor={passwordId} className="block text-xs text-gray-600 mb-1">Password</label>
+            <input id={passwordId} name="password" type="password" value={password} onChange={(e)=>onPasswordChange(e.target.value)} className="w-full rounded-xl border px-3 py-2 text-sm" placeholder="Enter password" autoComplete="current-password" />
           </div>
           <button type="submit" disabled={busy} className="w-full rounded-xl bg-violet-600 text-white py-2 text-sm font-semibold shadow hover:bg-violet-700 disabled:opacity-60">
             {busy ? 'Signing in...' : 'Log in'}
@@ -2816,6 +2847,14 @@ function Info({ label, value }) {
 function Static({ label, value }) {
   return <Info label={label} value={value} />;
 }
+function useFieldId(id, label) {
+  const reactId = React.useId();
+  const base = typeof label === 'string'
+    ? label.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+    : 'field';
+  const rawId = id || `${base || 'field'}-${reactId}`;
+  return rawId.replace(/:/g, '');
+}
 function fieldSizeClasses(size) {
   if (size === 'compact') {
     return { input: 'px-3 py-2.5', display: 'p-2.5' };
@@ -2826,44 +2865,53 @@ function Readonly({ label, value, size }) {
   const sizes = fieldSizeClasses(size);
   return (
     <div>
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <div className="block text-xs text-gray-600 mb-1">{label}</div>
       <div className={`rounded-xl border bg-white ${sizes.display}`}>{value}</div>
     </div>
   );
 }
-function Editable({ label, value, edit, onChange, size }) {
+function Editable({ label, value, edit, onChange, size, id, name }) {
+  const fieldId = useFieldId(id, label);
   const sizes = fieldSizeClasses(size);
+  const LabelTag = edit ? 'label' : 'div';
+  const labelProps = edit ? { htmlFor: fieldId } : {};
   return (
     <div>
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <LabelTag className="block text-xs text-gray-600 mb-1" {...labelProps}>{label}</LabelTag>
       {edit ? (
-        <input defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
+        <input id={fieldId} name={name || fieldId} defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
         <div className={`rounded-xl border bg-white ${sizes.display}`}>{value}</div>
       )}
     </div>
   );
 }
-function EditableNumber({ label, value, step = '0.01', edit, onChange, size }) {
+function EditableNumber({ label, value, step = '0.01', edit, onChange, size, id, name }) {
+  const fieldId = useFieldId(id, label);
   const sizes = fieldSizeClasses(size);
+  const LabelTag = edit ? 'label' : 'div';
+  const labelProps = edit ? { htmlFor: fieldId } : {};
   return (
     <div>
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <LabelTag className="block text-xs text-gray-600 mb-1" {...labelProps}>{label}</LabelTag>
       {edit ? (
-        <input type="number" defaultValue={value} step={step} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
+        <input id={fieldId} name={name || fieldId} type="number" defaultValue={value} step={step} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
         <div className={`rounded-xl border bg-white ${sizes.display}`}>{typeof value === 'number' ? value : String(value)}</div>
       )}
     </div>
   );
 }
-function EditableSelect({ label, value, options, edit, onChange, size }) {
+function EditableSelect({ label, value, options, edit, onChange, size, id, name }) {
+  const fieldId = useFieldId(id, label);
   const sizes = fieldSizeClasses(size);
+  const LabelTag = edit ? 'label' : 'div';
+  const labelProps = edit ? { htmlFor: fieldId } : {};
   return (
     <div>
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <LabelTag className="block text-xs text-gray-600 mb-1" {...labelProps}>{label}</LabelTag>
       {edit ? (
-        <select defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`}>
+        <select id={fieldId} name={name || fieldId} defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`}>
           {options.map(o => <option key={o} value={o}>{o}</option>)}
         </select>
       ) : (
@@ -2872,26 +2920,32 @@ function EditableSelect({ label, value, options, edit, onChange, size }) {
     </div>
   );
 }
-function EditableDate({ label, value, edit, onChange, size }) {
+function EditableDate({ label, value, edit, onChange, size, id, name }) {
+  const fieldId = useFieldId(id, label);
   const sizes = fieldSizeClasses(size);
+  const LabelTag = edit ? 'label' : 'div';
+  const labelProps = edit ? { htmlFor: fieldId } : {};
   return (
     <div>
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <LabelTag className="block text-xs text-gray-600 mb-1" {...labelProps}>{label}</LabelTag>
       {edit ? (
-        <input type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
+        <input id={fieldId} name={name || fieldId} type="date" defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} />
       ) : (
         <div className={`rounded-xl border bg-white ${sizes.display}`}>{toISODate(value)}</div>
       )}
     </div>
   );
 }
-function EditableTextArea({ label, value, edit, onChange, size }) {
+function EditableTextArea({ label, value, edit, onChange, size, id, name }) {
+  const fieldId = useFieldId(id, label);
   const sizes = fieldSizeClasses(size);
+  const LabelTag = edit ? 'label' : 'div';
+  const labelProps = edit ? { htmlFor: fieldId } : {};
   return (
     <div className="sm:col-span-2 lg:col-span-3">
-      <label className="block text-xs text-gray-600 mb-1">{label}</label>
+      <LabelTag className="block text-xs text-gray-600 mb-1" {...labelProps}>{label}</LabelTag>
       {edit ? (
-        <textarea defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} rows={2} />
+        <textarea id={fieldId} name={name || fieldId} defaultValue={value} onChange={(e)=>onChange(e.target.value)} className={`w-full rounded-xl border ${sizes.input}`} rows={2} />
       ) : (
         <div className={`rounded-xl border bg-white ${sizes.display} whitespace-pre-line`}>{value}</div>
       )}

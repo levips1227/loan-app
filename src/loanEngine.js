@@ -29,7 +29,13 @@ export const addDays = (date, days) => {
 };
 export const addMonths = (date, months) => {
   const d = parseISO(date);
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, d.getUTCDate()));
+  const year = d.getUTCFullYear();
+  const month = d.getUTCMonth();
+  const day = d.getUTCDate();
+  const target = new Date(Date.UTC(year, month + months, 1));
+  const endOfTarget = new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0));
+  const clampedDay = Math.min(day, endOfTarget.getUTCDate());
+  return new Date(Date.UTC(target.getUTCFullYear(), target.getUTCMonth(), clampedDay));
 };
 export const addYears = (date, years) => {
   const d = parseISO(date);
