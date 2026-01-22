@@ -37,6 +37,7 @@ The server will serve the built frontend from `dist/` and expose the API under `
 - The database is stored at `data/loan-app.sqlite` by default; back it up as needed.
 - `RESET_ADMIN_ON_START=true` will reset the admin user on startup (use once, then set back to `false`).
 - First-login password changes are not enforced; rotate admin credentials manually when needed.
+- The Windows launcher supports ngrok auto-tunneling when `NGROK_AUTHTOKEN` is set in `.env`.
 
 ### Environment variables
 - `ADMIN_USERNAME` / `ADMIN_PASSWORD`: bootstrap admin user if none exist (min 8 chars). Defaults to `Admin` / `change-me-please` if unset.
@@ -46,3 +47,4 @@ The server will serve the built frontend from `dist/` and expose the API under `
 - `TRUST_PROXY`: set to `true` if behind a reverse proxy
 - `VITE_API_BASE`: optional API base URL if hosting the frontend separately
 - `RESET_ADMIN_ON_START`: set to `true` to reset the admin user on server start
+- `NGROK_AUTHTOKEN`: optional token used by the Windows launcher to auto-start an ngrok tunnel
